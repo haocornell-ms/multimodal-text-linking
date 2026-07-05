@@ -46,8 +46,8 @@ python inference.py \
   --test_dataset MapText_test \
   --out_file predict.json \
   --model_dir ./_weights/finetune_light \
-  --anno_path icdar24-test-png-annotations.json \
-  --img_dir icdar24-test-png/test_images/
+  --anno_path [WORD-LEVEL SPOTTING JSON] \
+  --img_dir [IMAGE DIR]
 ```
 
 ## 📁 Notes
@@ -56,6 +56,7 @@ python inference.py \
 - All dataset configurations are in the `dataset/buildin.py`. You need to update the paths to your dataset and annotations. Contact [Yijun Lin](https://linyijun.github.io/) if you want to use the pretraining datasets. We use [ICDAR24 MapText competition Rumsey dataset](https://rrc.cvc.uab.es/?ch=28) for finetuning and testing.
 - All config files are in the `configs` directory. You can modify hyperparameters or dataset settings.
 - You can download model weights from Google Drive: [Polygon Pretrain Weights](https://drive.google.com/drive/folders/1Qo0u1cVdrQ3vQOBH_PUGNF7BOjDbG3OP?usp=drive_link), [LIGHT Pretrain Weights](https://drive.google.com/drive/folders/1YhqYR7qjL0lp-gCnv0BYxin2FfvRdupD?usp=drive_link), [LIGHT Fintuned Weights](https://drive.google.com/drive/folders/16Ups2gbW7EVAttD17KPTF3V5O-_Zd96m?usp=drive_link)
+- We provide a [word-level spotting data](https://drive.google.com/drive/folders/1srQ5oOwa8Uzn6OkZkqzCdAC7SEaLt5r3?usp=drive_link) from [PALETTE](https://github.com/kartta-foundation/mapkurator-palette-doc) (as an input to the model).
 
 ## 🔗 References
 

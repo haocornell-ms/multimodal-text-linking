@@ -96,6 +96,49 @@ def group_successors_with_probability(words, probabilities, bi_probabilities):
     return group_successors(words, new_successors)
 
 
+def top_k_successor_predictions(words, word_ids, probabilities,
+                                bi_probabilities, top_k=3):
+    """Return the highest-probability successor candidates for every word."""
+    if top_k < 1:
+        raise ValueError("top_k must be at least 1")
+
+    # ``word_ids`` contains only words retained after tokenizer truncation;
+    # ``words`` is the original, potentially longer list.
+    num_words = len(word_ids)
+    if probabilities.shape != (num_words, num_words):
+        raise ValueError(
+            f"Expected a {num_words}x{num_words} probability matrix, "
+            f"got {probabilities.shape}"
+        )
+
+    top_k = min(top_k, num_words)
+    predictions = []
+    for source_index in range(num_words):
+        target_indices = np.argsort(probabilities[source_index])[::-1][:top_k]
+        candidates = []
+        for target_index in target_indices:
+            target_index = int(target_index)
+            candidates.append({
+                "target_index": target_index,
+                "target_word_id": int(word_ids[target_index]),
+                "target_text": words[word_ids[target_index]],
+                "probability": float(probabilities[source_index, target_index]),
+                "reverse_probability": float(
+                    bi_probabilities[target_index, source_index]
+                ),
+                "is_self": target_index == source_index,
+            })
+
+        predictions.append({
+            "source_index": source_index,
+            "source_word_id": int(word_ids[source_index]),
+            "source_text": words[word_ids[source_index]],
+            "top_successors": candidates,
+        })
+
+    return predictions
+
+
 def main():
     # python inference.py --test_dataset test --out_file lithium.json --model_dir _runs/best/ --anno_path /home/yaoyi/shared/critical-maas/12month-text-extraction/spot/lithium.json  --img_dir /home/yaoyi/shared/critical-maas/12month-text-extraction/img_crops/lithium
     
@@ -105,6 +148,14 @@ def main():
     parser.add_argument('--out_file', type=str)
     parser.add_argument('--anno_path', type=str)
     parser.add_argument('--img_dir', type=str)
+    parser.add_argument(
+        '--prob_out_file', type=str, default=None,
+        help='Optional JSON file for per-word top-k successor probabilities.'
+    )
+    parser.add_argument(
+        '--top_k', type=int, default=3,
+        help='Number of successor candidates dumped per word (default: 3).'
+    )
     args, remaining_args = parser.parse_known_args()
     
     with open(os.path.join(args.model_dir, 'config.yaml'), 'r') as f:
@@ -132,6 +183,7 @@ def main():
     model.eval()
     with torch.no_grad():
         result_list = []
+        probability_result_list = []
         for i in tqdm(range(len(test_dataset)), total=len(test_dataset)):
             sample_data = test_dataset[i]
             if sample_data is None:
@@ -150,9 +202,22 @@ def main():
             bi_probabilities = torch.softmax(all_logits['bi_logits'][0], dim=-1)
             probabilities = probabilities.detach().cpu().numpy()
             bi_probabilities = bi_probabilities.detach().cpu().numpy()
+
+            if args.prob_out_file:
+                probability_result_list.append({
+                    "image": image_name,
+                    "words": top_k_successor_predictions(
+                        sample_data['ori_words'],
+                        sample_data['ori_word_ids'],
+                        probabilities,
+                        bi_probabilities,
+                        args.top_k,
+                    ),
+                })
             
             groups = group_successors_with_probability(sample_data['ori_word_ids'], 
-                                                       probabilities, bi_probabilities)
+                                                       probabilities.copy(),
+                                                       bi_probabilities.copy())
                 
             ori_words = sample_data['ori_words']
             ori_polygons = sample_data['ori_polygons']
@@ -179,6 +244,14 @@ def main():
         with open(os.path.join(args.model_dir, args.out_file), 'w') as f:
             json.dump(result_list, f, indent=4)
 
+        if args.prob_out_file:
+            probability_output_path = os.path.join(
+                args.model_dir, args.prob_out_file
+            )
+            with open(probability_output_path, 'w') as f:
+                json.dump(probability_result_list, f, indent=4)
+            print(f"Saved top-{args.top_k} probabilities to {probability_output_path}")
+
     if 'MapText' in args.test_dataset:
         gt_path = DATASET_META['MapText_test']['anno_path']
     # if 'HierText' in args.test_dataset:
@@ -190,5 +263,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-

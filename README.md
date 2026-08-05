@@ -45,10 +45,17 @@ python train.py --config configs/light.yaml
 python inference.py \
   --test_dataset MapText_test \
   --out_file predict.json \
+  --prob_out_file top3_probabilities.json \
   --model_dir ./_weights/finetune_light \
   --anno_path [WORD-LEVEL SPOTTING JSON] \
   --img_dir [IMAGE DIR]
 ```
+
+`--prob_out_file` optionally writes the top successor candidates for every word
+before greedy edge selection. It defaults to three candidates; use `--top_k` to
+change that number. Each candidate includes its word index, text, forward
+probability, and reverse-direction probability. The probability file is written
+inside `--model_dir` unless an absolute path is supplied.
 
 ## 📁 Notes
 
@@ -73,4 +80,3 @@ If you find this repository useful in your own work, we would appreciate a citat
    year = {2025}
 }
 ```
-

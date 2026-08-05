@@ -96,15 +96,20 @@ def group_successors_with_probability(words, probabilities, bi_probabilities):
     return group_successors(words, new_successors)
 
 
-def top_k_successor_predictions(words, word_ids, probabilities,
+def top_k_successor_predictions(words, polygons, word_ids, probabilities,
                                 bi_probabilities, top_k=3):
-    """Return the highest-probability successor candidates for every word."""
+    """Return top successor candidates with source and target polygons."""
     if top_k < 1:
         raise ValueError("top_k must be at least 1")
 
     # ``word_ids`` contains only words retained after tokenizer truncation;
     # ``words`` is the original, potentially longer list.
     num_words = len(word_ids)
+    if len(words) != len(polygons):
+        raise ValueError(
+            f"Expected one polygon per word, got {len(words)} words and "
+            f"{len(polygons)} polygons"
+        )
     if probabilities.shape != (num_words, num_words):
         raise ValueError(
             f"Expected a {num_words}x{num_words} probability matrix, "
@@ -118,10 +123,10 @@ def top_k_successor_predictions(words, word_ids, probabilities,
         candidates = []
         for target_index in target_indices:
             target_index = int(target_index)
+            target_word_id = int(word_ids[target_index])
             candidates.append({
-                "target_index": target_index,
-                "target_word_id": int(word_ids[target_index]),
-                "target_text": words[word_ids[target_index]],
+                "target_text": words[target_word_id],
+                "target_vertices": polygons[target_word_id],
                 "probability": float(probabilities[source_index, target_index]),
                 "reverse_probability": float(
                     bi_probabilities[target_index, source_index]
@@ -129,10 +134,10 @@ def top_k_successor_predictions(words, word_ids, probabilities,
                 "is_self": target_index == source_index,
             })
 
+        source_word_id = int(word_ids[source_index])
         predictions.append({
-            "source_index": source_index,
-            "source_word_id": int(word_ids[source_index]),
-            "source_text": words[word_ids[source_index]],
+            "source_text": words[source_word_id],
+            "source_vertices": polygons[source_word_id],
             "top_successors": candidates,
         })
 
@@ -208,6 +213,7 @@ def main():
                     "image": image_name,
                     "words": top_k_successor_predictions(
                         sample_data['ori_words'],
+                        sample_data['ori_polygons'],
                         sample_data['ori_word_ids'],
                         probabilities,
                         bi_probabilities,

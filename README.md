@@ -53,7 +53,8 @@ python inference.py \
 
 `--prob_out_file` optionally writes the top successor candidates for every word
 before greedy edge selection. It defaults to three candidates; use `--top_k` to
-change that number. Each candidate includes its word index, text, forward
+change that number. Each entry includes the source text and polygon vertices;
+each candidate includes the target text and polygon vertices, forward
 probability, and reverse-direction probability. The probability file is written
 inside `--model_dir` unless an absolute path is supplied.
 

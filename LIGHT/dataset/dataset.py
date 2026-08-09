@@ -15,6 +15,85 @@ from dataset.buildin import DATASET_META
 from scipy.spatial import KDTree
 
 
+def _letterbox_rgb(image, output_height, output_width):
+    """Resize an RGB crop without changing its aspect ratio."""
+    height, width = image.shape[:2]
+    scale = min(output_width / max(width, 1), output_height / max(height, 1))
+    resized_width = max(1, int(round(width * scale)))
+    resized_height = max(1, int(round(height * scale)))
+    resized = cv2.resize(image, (resized_width, resized_height), interpolation=cv2.INTER_AREA)
+    canvas = np.full((output_height, output_width, 3), 255, dtype=np.uint8)
+    y0 = (output_height - resized_height) // 2
+    x0 = (output_width - resized_width) // 2
+    canvas[y0:y0 + resized_height, x0:x0 + resized_width] = resized
+    return canvas
+
+
+def extract_word_visual_features(image, polygon, output_height, output_width, context_scale=0.25):
+    """Return a high-resolution word crop, appearance statistics, and geometry.
+
+    The crop is taken from the original map rather than LayoutLMv3's resized image.
+    Descriptors are deliberately simple and deterministic so they can supplement
+    the learned crop encoder on small training sets.
+    """
+    rgb = np.asarray(image, dtype=np.uint8)
+    image_height, image_width = rgb.shape[:2]
+    polygon = np.asarray(polygon, dtype=np.float32).reshape(-1, 2)
+    x0, y0 = polygon.min(axis=0)
+    x1, y1 = polygon.max(axis=0)
+    width = max(float(x1 - x0), 1.0)
+    height = max(float(y1 - y0), 1.0)
+    pad_x, pad_y = context_scale * width, context_scale * height
+    left = max(0, int(np.floor(x0 - pad_x)))
+    top = max(0, int(np.floor(y0 - pad_y)))
+    right = min(image_width, int(np.ceil(x1 + pad_x)) + 1)
+    bottom = min(image_height, int(np.ceil(y1 + pad_y)) + 1)
+    raw_crop = rgb[top:bottom, left:right]
+    if raw_crop.size == 0:
+        raw_crop = np.full((1, 1, 3), 255, dtype=np.uint8)
+    crop = _letterbox_rgb(raw_crop, output_height, output_width)
+
+    # Compute statistics before letterboxing so padding does not masquerade as background.
+    raw_crop_float = raw_crop.astype(np.float32) / 255.0
+    gray = cv2.cvtColor(raw_crop, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
+    edges = cv2.Canny(raw_crop, 80, 160).astype(np.float32) / 255.0
+    border = np.concatenate((gray[0], gray[-1], gray[:, 0], gray[:, -1]))
+    raw_height, raw_width = gray.shape
+    center = gray[raw_height // 4:max(raw_height // 4 + 1, 3 * raw_height // 4),
+                  raw_width // 4:max(raw_width // 4 + 1, 3 * raw_width // 4)]
+    rect = cv2.minAreaRect(polygon)
+    angle = float(rect[2])
+    if rect[1][0] < rect[1][1]:
+        angle += 90.0
+    angle = np.deg2rad(angle)
+
+    # 15 appearance/scale descriptors. Size values are map-normalized.
+    style = np.asarray([
+        *raw_crop_float.mean(axis=(0, 1)).tolist(),
+        *raw_crop_float.std(axis=(0, 1)).tolist(),
+        float(gray.std()),
+        float(edges.mean()),
+        float(abs(center.mean() - border.mean())),
+        float((gray < max(0.05, border.mean() - 0.15)).mean()),
+        width / max(image_width, 1),
+        height / max(image_height, 1),
+        float(np.log(max(width / height, 1e-4))),
+        float(np.sin(angle)),
+        float(np.cos(angle)),
+    ], dtype=np.float32)
+    geometry = np.asarray([
+        ((x0 + x1) * 0.5) / max(image_width, 1),
+        ((y0 + y1) * 0.5) / max(image_height, 1),
+        width / max(image_width, 1),
+        height / max(image_height, 1),
+        (width * height) / max(image_width * image_height, 1),
+        float(np.sin(angle)),
+        float(np.cos(angle)),
+    ], dtype=np.float32)
+    crop_tensor = torch.from_numpy(crop.astype(np.float32) / 255.0).permute(2, 0, 1)
+    return crop_tensor, torch.from_numpy(style), torch.from_numpy(geometry)
+
+
 def synthetic_map_data_processor(anno_data, thre=3):    
     out_anno_data = []
     if dataset_name == 'SynthMap_train':
@@ -116,6 +195,7 @@ def process_one_sample(
     max_length = getattr(args, "token_padding_max_length", 1280)
     ##################################################################################
     words, bboxes, labels, polygons, ori_polygons = [], [], [], [], []
+    word_crops, word_styles, word_geometries = [], [], []
     for group in anno:
         for item in group:
             if item.get('label') is None: continue;
@@ -143,6 +223,15 @@ def process_one_sample(
             polygons.append(poly_tensor)
             words.append(text)
             labels.append(item['label'])
+            crop, style, geometry = extract_word_visual_features(
+                image, poly,
+                output_height=getattr(args, "word_crop_height", 32),
+                output_width=getattr(args, "word_crop_width", 128),
+                context_scale=getattr(args, "word_crop_context", 0.25),
+            )
+            word_crops.append(crop)
+            word_styles.append(style)
+            word_geometries.append(geometry)
             
     if len(words) == 0 or len(polygons) == 0:
         return None, None
@@ -162,6 +251,9 @@ def process_one_sample(
     polygons = [polygons[i] for i in indices]
     bboxes = [bboxes[i] for i in indices]
     ori_polygons = [ori_polygons[i] for i in indices]    
+    word_crops = [word_crops[i] for i in indices]
+    word_styles = [word_styles[i] for i in indices]
+    word_geometries = [word_geometries[i] for i in indices]
     
     ##################################################################################
     ori_data_dict = {
@@ -212,6 +304,19 @@ def process_one_sample(
     first_token_indices = torch.tensor(first_token_indices, dtype=torch.long)
     first_token_indices = F.pad(first_token_indices, (0, max_length-first_token_indices.shape[0]), value=-999)
     ori_data_dict['word_ids'] = word_ids
+    max_style_words = getattr(args, "max_style_words", 256)
+    crop_height = getattr(args, "word_crop_height", 32)
+    crop_width = getattr(args, "word_crop_width", 128)
+    padded_crops = torch.zeros((max_style_words, 3, crop_height, crop_width), dtype=torch.float32)
+    padded_styles = torch.zeros((max_style_words, 15), dtype=torch.float32)
+    padded_geometries = torch.zeros((max_style_words, 7), dtype=torch.float32)
+    word_visual_mask = torch.zeros(max_style_words, dtype=torch.bool)
+    retained_word_ids = word_ids[:max_style_words]
+    for output_index, word_id in enumerate(retained_word_ids):
+        padded_crops[output_index] = word_crops[word_id]
+        padded_styles[output_index] = word_styles[word_id]
+        padded_geometries[output_index] = word_geometries[word_id]
+        word_visual_mask[output_index] = True
     output = {
         'input_ids': input_ids,
         'first_token_indices': first_token_indices,
@@ -219,7 +324,11 @@ def process_one_sample(
         'labels': labels,
         'attention_mask': attention_mask,
         'pixel_values': pixel_values,
-        'polygons': new_polygons
+        'polygons': new_polygons,
+        'word_crops': padded_crops,
+        'word_styles': padded_styles,
+        'word_geometries': padded_geometries,
+        'word_visual_mask': word_visual_mask,
     }
     return output, ori_data_dict
 
@@ -305,9 +414,6 @@ class LinkingTestDataset(Dataset):
             output['ori_polygons'] = ori_data_dict["polygons"]
             output['ori_word_ids'] = ori_data_dict["word_ids"]
         return output
-
-
-
 
 
 

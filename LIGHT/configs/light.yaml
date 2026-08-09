@@ -5,7 +5,20 @@ output_dir: './_runs/'
 base_model: "light"
 exp_name: 'test'
 embedding_components: ["token", "poly"]
-aux_losses: ["bidirection", "focal"]
+aux_losses: ["bidirection", "focal", "style_contrastive"]
+
+# Word-aligned visual/style branch. Crops come from the original-resolution map.
+use_word_style: True
+word_crop_height: 32
+word_crop_width: 128
+word_crop_context: 0.25
+max_style_words: 256
+style_embedding_dim: 256
+style_contrastive_weight: 0.1
+style_temperature: 0.1
+
+# Adds a learned directional geometry/style bias to the original dot-product score.
+use_pairwise_relations: True
 
 token_padding_max_length: 1000
 padding_token_id: -100
@@ -33,4 +46,3 @@ scheduler_patience: 5
 patience: 9
 
 version: 4
-

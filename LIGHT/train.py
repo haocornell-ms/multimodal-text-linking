@@ -51,6 +51,8 @@ def main():
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f'GPU Device: {device}')
+    os.makedirs(args.log_dir, exist_ok=True)
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
     log_writer = SummaryWriter(log_dir=args.log_dir)
     with open(args.save_config_file, 'w') as f:
         yaml.dump(vars(args), f, default_flow_style=False)
@@ -138,7 +140,9 @@ def main():
 
         ### terminate
         if epochs_no_improve >= args.patience or epoch == args.num_epochs - 1:
-            base_comm = f"python inference.py --test_dataset MapText_test --out_file predict.json --model_dir {model_dir} --anno_path {anno_path} --img_dir {img_dir}"
+            base_comm = ("python inference.py --test_dataset MapText_test "
+                         "--out_file predict.json --model_dir {model_dir} "
+                         "--anno_path {anno_path} --img_dir {img_dir}")
             if args.val_dataset == "MapText_val":
                 comm = base_comm.format(model_dir=args.output_dir, 
                                         anno_path=DATASET_META['MapText_test']['anno_path'], 

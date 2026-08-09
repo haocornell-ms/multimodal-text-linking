@@ -173,7 +173,7 @@ def main():
     ### Load model ###
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = os.path.join(args.model_dir, 'best_model.pth')
-    state_dict = torch.load(checkpoint_path)
+    state_dict = torch.load(checkpoint_path, map_location=device)
 
     model = LightTextLinking(args)
     msg = model.load_state_dict(state_dict, strict=False)

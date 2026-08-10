@@ -16,6 +16,10 @@ focal_gamma: 2.0
 roi_output_size: 7
 target_visual_size: 28
 
+# Set to a directory to export the exact word crops consumed by the model.
+# Leave empty to avoid the additional disk I/O.
+word_crop_save_dir: ""
+
 # token
 token_padding_max_length: 1000
 max_position_embeddings: 1024

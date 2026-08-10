@@ -3,6 +3,7 @@ import sys
 import json
 import numpy as np
 import random
+import re
 from PIL import Image
 
 import torch
@@ -94,6 +95,22 @@ def extract_word_visual_features(image, polygon, output_height, output_width, co
     return crop_tensor, torch.from_numpy(style), torch.from_numpy(geometry)
 
 
+def save_word_crop(crop, save_root, dataset_name, image_name, word_index, text):
+    """Save the exact letterboxed crop passed to the word-style encoder."""
+    if not save_root:
+        return
+    image_stem = os.path.splitext(os.path.basename(image_name))[0]
+    safe_text = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("_")[:40] or "empty"
+    crop_dir = os.path.join(save_root, dataset_name, image_stem)
+    os.makedirs(crop_dir, exist_ok=True)
+    crop_array = (
+        crop.detach().cpu().permute(1, 2, 0).numpy().clip(0, 1) * 255
+    ).round().astype(np.uint8)
+    Image.fromarray(crop_array, mode="RGB").save(
+        os.path.join(crop_dir, f"{word_index:04d}_{safe_text}.png")
+    )
+
+
 def synthetic_map_data_processor(anno_data, thre=3):    
     out_anno_data = []
     if dataset_name == 'SynthMap_train':
@@ -182,7 +199,9 @@ def process_one_sample(
     anno,
     image,
     is_shuffle=True,
-    args=None
+    args=None,
+    image_name="unknown",
+    dataset_name="dataset",
 ):
     ###
     ### image processor
@@ -228,6 +247,14 @@ def process_one_sample(
                 output_height=getattr(args, "word_crop_height", 32),
                 output_width=getattr(args, "word_crop_width", 128),
                 context_scale=getattr(args, "word_crop_context", 0.25),
+            )
+            save_word_crop(
+                crop,
+                getattr(args, "word_crop_save_dir", ""),
+                dataset_name,
+                image_name,
+                len(word_crops),
+                text,
             )
             word_crops.append(crop)
             word_styles.append(style)
@@ -367,7 +394,9 @@ class LinkingTrainDataset(Dataset):
         image, anno, image_name = self.datasets[dataset_name].get_item(idx, is_random=True)
         output, _ = process_one_sample(self.tokenizer, self.image_processor, 
                                        anno, image, 
-                                       self.shuffle, self.args)
+                                       self.shuffle, self.args,
+                                       image_name=image_name,
+                                       dataset_name=dataset_name)
         return output
 
     
@@ -406,7 +435,9 @@ class LinkingTestDataset(Dataset):
         image, anno, image_name = self.dataset.get_item(idx)
         output, ori_data_dict = process_one_sample(self.tokenizer, self.image_processor, 
                                                    anno, image, 
-                                                   self.shuffle, self.args)
+                                                   self.shuffle, self.args,
+                                                   image_name=image_name,
+                                                   dataset_name=self.dataset_name)
         if output is None: return None;
         if self.return_ori:
             output['image_name'] = image_name
@@ -414,6 +445,5 @@ class LinkingTestDataset(Dataset):
             output['ori_polygons'] = ori_data_dict["polygons"]
             output['ori_word_ids'] = ori_data_dict["word_ids"]
         return output
-
 
 

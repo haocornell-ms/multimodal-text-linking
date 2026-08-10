@@ -12,6 +12,7 @@ use_word_style: True
 word_crop_height: 32
 word_crop_width: 128
 word_crop_context: 0.25
+word_crop_save_dir: "./word_crops"
 max_style_words: 256
 style_embedding_dim: 256
 style_contrastive_weight: 0.1
@@ -28,7 +29,7 @@ max_len: 32
 poly_only: False
 text_only: False
 
-light_pretrained_weights: "_weights/pretrain_light/model_epoch_3000.pth"
+light_pretrained_weights: "/workspace/weights/pretrain_light/model_epoch_3500.pth"
 # light_pretrained_weights: "_runs/test__v3/models/model_epoch_1.pth"
 
 batch_size: 2

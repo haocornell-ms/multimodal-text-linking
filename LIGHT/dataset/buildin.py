@@ -1,12 +1,12 @@
 DATASET_META = {
     "MapText_train": {
-        "anno_path": '/home/yaoyi/lin00786/data/spotter-data/MapImages/icdar24-maptext-rumsey/competition-data/icdar24-train-png-annotations.json',
-        "img_dir": '/home/yaoyi/lin00786/data/spotter-data/MapImages/icdar24-maptext-rumsey/competition-data/icdar24-train-png/train_images/'
+        "anno_path": '/workspace/datasets/gt_data/icdar24-train-png-annotations.json',
+        "img_dir": '/workspace/datasets/gt_data/icdar24-train-png/train_images/'
     },
     "MapText_val": {
-        "anno_path": '/home/yaoyi/lin00786/data/spotter-data/MapImages/icdar24-maptext-rumsey/competition-data/icdar24-val-png-annotations.json',
-        "img_dir": '/home/yaoyi/lin00786/data/spotter-data/MapImages/icdar24-maptext-rumsey/competition-data/icdar24-val-png/val_images/'
-    },
+        "anno_path": '/workspace/datasets/gt_data/icdar24-val-png-annotations.json',
+        "img_dir": '/workspace/datasets/gt_data/icdar24-val-png/val_images/'
+    }, 
     "MapText_test": {
         "anno_path": '/home/yaoyi/lin00786/data/spotter-data/MapImages/icdar24-maptext-rumsey/competition-data/icdar24-test-png-annotations.json',
         "img_dir": '/home/yaoyi/lin00786/data/spotter-data/MapImages/icdar24-maptext-rumsey/competition-data/icdar24-test-png/test_images/'

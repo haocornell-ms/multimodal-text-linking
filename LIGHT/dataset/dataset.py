@@ -30,6 +30,63 @@ def _letterbox_rgb(image, output_height, output_width):
     return canvas
 
 
+def _order_quad_points(points):
+    """Return quadrilateral corners as top-left, top-right, bottom-right, bottom-left."""
+    points = np.asarray(points, dtype=np.float32).reshape(4, 2)
+    ordered = np.zeros((4, 2), dtype=np.float32)
+    coordinate_sum = points.sum(axis=1)
+    coordinate_difference = np.diff(points, axis=1).reshape(-1)
+    ordered[0] = points[np.argmin(coordinate_sum)]
+    ordered[2] = points[np.argmax(coordinate_sum)]
+    ordered[1] = points[np.argmin(coordinate_difference)]
+    ordered[3] = points[np.argmax(coordinate_difference)]
+    return ordered
+
+
+def _extract_oriented_crop(rgb, polygon, context_scale):
+    """Rectify a word polygon and return a horizontal, reading-scale crop.
+
+    Using an axis-aligned bounding box makes a near-vertical word occupy only a
+    thin sliver after it is fitted into a wide word canvas.  This function uses
+    the polygon's minimum-area rectangle, expands it for context, and applies a
+    perspective transform before rotating portrait results to landscape.
+    """
+    rect = cv2.minAreaRect(polygon.astype(np.float32))
+    center, (rect_width, rect_height), angle = rect
+    rect_width = max(float(rect_width), 1.0) * (1.0 + 2.0 * context_scale)
+    rect_height = max(float(rect_height), 1.0) * (1.0 + 2.0 * context_scale)
+    expanded_rect = (center, (rect_width, rect_height), angle)
+    source = _order_quad_points(cv2.boxPoints(expanded_rect))
+
+    # Keep enough source pixels for small text instead of downsampling early.
+    warp_width = max(1, int(round(max(
+        np.linalg.norm(source[1] - source[0]),
+        np.linalg.norm(source[2] - source[3]),
+    ))))
+    warp_height = max(1, int(round(max(
+        np.linalg.norm(source[3] - source[0]),
+        np.linalg.norm(source[2] - source[1]),
+    ))))
+    destination = np.asarray([
+        [0, 0],
+        [warp_width - 1, 0],
+        [warp_width - 1, warp_height - 1],
+        [0, warp_height - 1],
+    ], dtype=np.float32)
+    transform = cv2.getPerspectiveTransform(source, destination)
+    crop = cv2.warpPerspective(
+        rgb,
+        transform,
+        (warp_width, warp_height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(255, 255, 255),
+    )
+    if crop.shape[0] > crop.shape[1]:
+        crop = cv2.rotate(crop, cv2.ROTATE_90_CLOCKWISE)
+    return crop, rect
+
+
 def extract_word_visual_features(image, polygon, output_height, output_width, context_scale=0.25):
     """Return a high-resolution word crop, appearance statistics, and geometry.
 
@@ -44,12 +101,7 @@ def extract_word_visual_features(image, polygon, output_height, output_width, co
     x1, y1 = polygon.max(axis=0)
     width = max(float(x1 - x0), 1.0)
     height = max(float(y1 - y0), 1.0)
-    pad_x, pad_y = context_scale * width, context_scale * height
-    left = max(0, int(np.floor(x0 - pad_x)))
-    top = max(0, int(np.floor(y0 - pad_y)))
-    right = min(image_width, int(np.ceil(x1 + pad_x)) + 1)
-    bottom = min(image_height, int(np.ceil(y1 + pad_y)) + 1)
-    raw_crop = rgb[top:bottom, left:right]
+    raw_crop, rect = _extract_oriented_crop(rgb, polygon, context_scale)
     if raw_crop.size == 0:
         raw_crop = np.full((1, 1, 3), 255, dtype=np.uint8)
     crop = _letterbox_rgb(raw_crop, output_height, output_width)
@@ -62,7 +114,6 @@ def extract_word_visual_features(image, polygon, output_height, output_width, co
     raw_height, raw_width = gray.shape
     center = gray[raw_height // 4:max(raw_height // 4 + 1, 3 * raw_height // 4),
                   raw_width // 4:max(raw_width // 4 + 1, 3 * raw_width // 4)]
-    rect = cv2.minAreaRect(polygon)
     angle = float(rect[2])
     if rect[1][0] < rect[1][1]:
         angle += 90.0
@@ -445,5 +496,3 @@ class LinkingTestDataset(Dataset):
             output['ori_polygons'] = ori_data_dict["polygons"]
             output['ori_word_ids'] = ori_data_dict["word_ids"]
         return output
-
-

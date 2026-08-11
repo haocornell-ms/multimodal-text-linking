@@ -29,6 +29,37 @@ def count_parameters(model, trainable_only=True):
         return sum(p.numel() for p in model.parameters())
 
 
+def build_optimizer(model, args):
+    """Use a conservative LR for pretrained LIGHT and a larger LR elsewhere."""
+    backbone_parameters = [
+        parameter for parameter in model.light.parameters() if parameter.requires_grad
+    ]
+    backbone_parameter_ids = {id(parameter) for parameter in backbone_parameters}
+    task_parameters = [
+        parameter for parameter in model.parameters()
+        if parameter.requires_grad and id(parameter) not in backbone_parameter_ids
+    ]
+
+    backbone_lr = getattr(args, "backbone_lr", args.lr)
+    parameter_groups = [
+        {"params": backbone_parameters, "lr": backbone_lr, "name": "light_backbone"},
+        {"params": task_parameters, "lr": args.lr, "name": "task_and_visual"},
+    ]
+    parameter_groups = [group for group in parameter_groups if group["params"]]
+    optimizer = AdamW(
+        parameter_groups,
+        betas=(0.9, 0.999),
+        weight_decay=args.weight_decay,
+    )
+    for group in optimizer.param_groups:
+        num_parameters = sum(parameter.numel() for parameter in group["params"])
+        print(
+            f"Optimizer group {group['name']}: {num_parameters:,} parameters, "
+            f"lr={group['lr']:.2e}"
+        )
+    return optimizer
+
+
 def validate(model, data_loader, device, log_writer, epoch=None):
     model.eval()
     total_losses = defaultdict(int)
@@ -80,7 +111,7 @@ def main():
     total_params = count_parameters(model, trainable_only=False)
     print(f"Total parameters: {total_params:,}")
 
-    optimizer = AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.999), weight_decay=args.weight_decay)
+    optimizer = build_optimizer(model, args)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         patience=args.scheduler_patience, 

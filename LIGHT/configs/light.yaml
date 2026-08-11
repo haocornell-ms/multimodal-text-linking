@@ -15,6 +15,8 @@ word_crop_context: 0.25
 word_crop_save_dir: "./word_crops"
 max_style_words: 256
 style_embedding_dim: 256
+# LayerNorm(text/style) -> concatenate -> MLP -> learned gated residual.
+style_fusion_hidden_dim: 768
 style_contrastive_weight: 0.1
 style_temperature: 0.1
 
@@ -41,7 +43,10 @@ val_data_shuffle: False
 save_every_epoch: 100
 eval_every_epoch: 1
 num_epochs: 100
+# Task heads, word-style encoder, and gated fusion learning rate.
 lr: 0.00005
+# Lower learning rate for the pretrained LIGHT backbone.
+backbone_lr: 0.000005
 weight_decay: 0.0
 scheduler_patience: 5
 patience: 9

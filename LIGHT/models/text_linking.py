@@ -40,6 +40,36 @@ class WordStyleEncoder(nn.Module):
         return self.fusion(torch.cat((crop_features, descriptor_features), dim=-1))
 
 
+class GatedStyleFusion(nn.Module):
+    """Fuse word-level visual style into text with a gated residual."""
+    def __init__(self, text_dim=768, style_dim=256, hidden_dim=768):
+        super().__init__()
+        self.text_norm = nn.LayerNorm(text_dim)
+        self.style_norm = nn.LayerNorm(style_dim)
+        input_dim = text_dim + style_dim
+        self.delta_mlp = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, text_dim),
+        )
+        self.gate = nn.Linear(input_dim, text_dim)
+
+        # Start close to the text-only model while retaining gradients through
+        # both the visual branch and the gate from the first update.
+        nn.init.normal_(self.delta_mlp[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.delta_mlp[-1].bias)
+        nn.init.zeros_(self.gate.weight)
+        nn.init.constant_(self.gate.bias, -2.0)
+
+    def forward(self, text_embeddings, style_embeddings):
+        fused_input = torch.cat((
+            self.text_norm(text_embeddings),
+            self.style_norm(style_embeddings),
+        ), dim=-1)
+        style_delta = self.delta_mlp(fused_input)
+        return text_embeddings + torch.sigmoid(self.gate(fused_input)) * style_delta
+
+
 class LightTextLinking(nn.Module):
     def __init__(self, args):
         super(LightTextLinking, self).__init__()
@@ -53,6 +83,7 @@ class LightTextLinking(nn.Module):
         self.style_contrastive_weight = getattr(args, "style_contrastive_weight", 0.1)
         self.style_temperature = getattr(args, "style_temperature", 0.1)
         self.style_dim = getattr(args, "style_embedding_dim", 256)
+        self.style_fusion_hidden_dim = getattr(args, "style_fusion_hidden_dim", self.emb_dim)
 
         self.config = LayoutLMv3Config(max_position_embeddings=self.max_position_embeddings)
         self.light = LightModel(self.config)
@@ -60,10 +91,11 @@ class LightTextLinking(nn.Module):
 
         if self.use_word_style:
             self.word_style_encoder = WordStyleEncoder(output_dim=self.style_dim)
-            self.style_projection = nn.Linear(self.style_dim, self.emb_dim)
-            # Preserve pretrained LIGHT behavior at initialization.
-            nn.init.zeros_(self.style_projection.weight)
-            nn.init.zeros_(self.style_projection.bias)
+            self.style_fusion = GatedStyleFusion(
+                text_dim=self.emb_dim,
+                style_dim=self.style_dim,
+                hidden_dim=self.style_fusion_hidden_dim,
+            )
 
         if self.use_pairwise_relations:
             self.relation_mlp = nn.Sequential(
@@ -117,9 +149,10 @@ class LightTextLinking(nn.Module):
                 sample_styles[:available_words] = style_embeddings[batch_idx, :available_words]
                 visual_mask = torch.zeros(num_words, dtype=torch.bool, device=embeddings.device)
                 visual_mask[:available_words] = input_data['word_visual_mask'][batch_idx, :available_words]
-                style_delta = self.style_projection(sample_styles)
-                style_delta = style_delta * visual_mask.unsqueeze(-1).to(style_delta.dtype)
-                embeddings = embeddings + style_delta
+                fused_embeddings = self.style_fusion(embeddings, sample_styles)
+                embeddings = torch.where(
+                    visual_mask.unsqueeze(-1), fused_embeddings, embeddings
+                )
             
             pred_embeddings = self.predecessor_mlp(embeddings)
             succ_embeddings = self.successor_mlp(embeddings)

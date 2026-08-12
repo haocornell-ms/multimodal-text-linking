@@ -247,6 +247,10 @@ def main():
         '--visual_contribution_examples', type=int, default=20,
         help='Number of strongest visual effects printed (default: 20).'
     )
+    parser.add_argument(
+        '--disable_word_visuals', action='store_true',
+        help='Disable word-crop/style inputs for the main saved predictions.'
+    )
     args, remaining_args = parser.parse_known_args()
     
     with open(os.path.join(args.model_dir, 'config.yaml'), 'r') as f:
@@ -260,7 +264,8 @@ def main():
         f"use_word_style={getattr(args, 'use_word_style', False)}, "
         f"use_pairwise_relations={getattr(args, 'use_pairwise_relations', False)}, "
         f"preserve_text_stop_scores={getattr(args, 'preserve_text_stop_scores', False)}, "
-        f"use_factorized_linking={getattr(args, 'use_factorized_linking', False)}"
+        f"use_factorized_linking={getattr(args, 'use_factorized_linking', False)}, "
+        f"disable_word_visuals={args.disable_word_visuals}"
     )
 
     ### Load model ###
@@ -295,6 +300,10 @@ def main():
             input_data.pop('ori_polygons')
             input_data.pop('ori_word_ids')
             input_data = {k: v.unsqueeze(0).to(device) for k, v in input_data.items()}
+            if args.disable_word_visuals:
+                input_data['word_visual_mask'] = torch.zeros_like(
+                    input_data['word_visual_mask']
+                )
             all_logits, _ = model(input_data, return_loss=False)
 
             if args.visual_contribution_stats:

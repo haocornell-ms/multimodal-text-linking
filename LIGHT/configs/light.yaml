@@ -3,9 +3,9 @@ _BASE_: "./base.yaml"
 # base settings
 output_dir: './_runs/'
 base_model: "light"
-exp_name: 'factorized_visual'
+exp_name: 'visual_edge_residual'
 embedding_components: ["token", "poly"]
-aux_losses: ["bidirection"]
+aux_losses: ["bidirection", "focal"]
 
 # Word-aligned visual/style branch. Crops come from the original-resolution map.
 use_word_style: True
@@ -15,14 +15,17 @@ word_crop_context: 0.25
 word_crop_save_dir: "./word_crops"
 max_style_words: 256
 style_embedding_dim: 256
-# Late fusion: preserve text embeddings, score visual candidate pairs directly,
-# and train explicit STOP/CONTINUE heads.
-use_factorized_linking: True
+# Preserve the original joint successor model and add a conservative learned
+# visual/geometry residual directly to candidate-edge scores.
+use_factorized_linking: False
+use_visual_edge_residual: True
+use_token_style_fusion: False
 visual_pair_dim: 32
-stop_loss_weight: 1.0
+visual_edge_initial_scale: 0.05
+visual_edge_max_scale: 1.0
 
-# Legacy fusion paths are disabled in factorized mode.
-use_pairwise_relations: False
+# Retain the original relation scoring path while testing richer crop pairs.
+use_pairwise_relations: True
 preserve_text_stop_scores: False
 style_contrastive_weight: 0.0
 
@@ -46,7 +49,7 @@ val_data_shuffle: False
 save_every_epoch: 100
 eval_every_epoch: 1
 num_epochs: 100
-# Task heads, word-style encoder, edge scorer, and STOP-head learning rate.
+# Task heads, word-style encoder, and edge scorer learning rate.
 lr: 0.00005
 # Lower learning rate for the pretrained LIGHT backbone.
 backbone_lr: 0.000005
@@ -54,4 +57,4 @@ weight_decay: 0.0
 scheduler_patience: 5
 patience: 9
 
-version: 5
+version: 6

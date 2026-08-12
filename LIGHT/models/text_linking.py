@@ -129,10 +129,18 @@ class LightTextLinking(nn.Module):
         self.style_dim = getattr(args, "style_embedding_dim", 256)
         self.style_fusion_hidden_dim = getattr(args, "style_fusion_hidden_dim", self.emb_dim)
         self.use_factorized_linking = getattr(args, "use_factorized_linking", False)
+        self.use_visual_edge_residual = getattr(args, "use_visual_edge_residual", False)
+        self.use_token_style_fusion = getattr(args, "use_token_style_fusion", True)
         self.stop_loss_weight = getattr(args, "stop_loss_weight", 1.0)
         self.visual_pair_dim = getattr(args, "visual_pair_dim", 32)
-        if self.use_factorized_linking and not self.use_word_style:
-            raise ValueError("use_factorized_linking requires use_word_style=True")
+        self.visual_edge_max_scale = getattr(args, "visual_edge_max_scale", 1.0)
+        self.visual_edge_initial_scale = getattr(args, "visual_edge_initial_scale", 0.05)
+        if (self.use_factorized_linking or self.use_visual_edge_residual) and not self.use_word_style:
+            raise ValueError("Visual edge scoring requires use_word_style=True")
+        if self.use_factorized_linking and self.use_visual_edge_residual:
+            raise ValueError(
+                "use_factorized_linking and use_visual_edge_residual are mutually exclusive"
+            )
 
         self.config = LayoutLMv3Config(max_position_embeddings=self.max_position_embeddings)
         self.light = LightModel(self.config)
@@ -140,10 +148,19 @@ class LightTextLinking(nn.Module):
 
         if self.use_word_style:
             self.word_style_encoder = WordStyleEncoder(output_dim=self.style_dim)
-            if self.use_factorized_linking:
+            if self.use_factorized_linking or self.use_visual_edge_residual:
                 self.visual_edge_scorer = LateVisualEdgeScorer(
                     style_dim=self.style_dim, pair_dim=self.visual_pair_dim
                 )
+            if self.use_visual_edge_residual:
+                initial_fraction = min(max(
+                    self.visual_edge_initial_scale / self.visual_edge_max_scale,
+                    1e-4,
+                ), 1.0 - 1e-4)
+                self.visual_edge_scale_logit = nn.Parameter(torch.tensor(
+                    torch.logit(torch.tensor(initial_fraction)).item()
+                ))
+            if self.use_factorized_linking:
                 stop_input_dim = self.emb_dim + self.visual_pair_dim + 4
                 self.stop_style_projection = nn.Sequential(
                     nn.LayerNorm(self.style_dim),
@@ -151,7 +168,7 @@ class LightTextLinking(nn.Module):
                 )
                 self.successor_stop_head = self._make_stop_head(stop_input_dim)
                 self.predecessor_stop_head = self._make_stop_head(stop_input_dim)
-            else:
+            elif self.use_token_style_fusion:
                 self.style_fusion = GatedStyleFusion(
                     text_dim=self.emb_dim,
                     style_dim=self.style_dim,
@@ -177,6 +194,14 @@ class LightTextLinking(nn.Module):
             
         self.loss_fn = nn.CrossEntropyLoss() 
         self.focal_loss_fn = FocalLoss(alpha=args.focal_alpha, gamma=args.focal_gamma)
+
+    @property
+    def visual_edge_scale(self):
+        if not self.use_visual_edge_residual:
+            return None
+        return self.visual_edge_max_scale * torch.sigmoid(
+            self.visual_edge_scale_logit
+        )
 
     def forward(self, input_data, return_loss=True):
         B = input_data['labels'].shape[0]
@@ -211,7 +236,7 @@ class LightTextLinking(nn.Module):
                 sample_styles = embeddings.new_zeros((num_words, self.style_dim))
                 sample_styles[:available_words] = style_embeddings[batch_idx, :available_words]
                 visual_mask[:available_words] = input_data['word_visual_mask'][batch_idx, :available_words]
-                if not self.use_factorized_linking:
+                if not self.use_factorized_linking and self.use_token_style_fusion:
                     fused_embeddings = self.style_fusion(embeddings, sample_styles)
                     embeddings = torch.where(
                         visual_mask.unsqueeze(-1), fused_embeddings, embeddings
@@ -230,10 +255,17 @@ class LightTextLinking(nn.Module):
         
             dot_products = torch.matmul(pred_embeddings, succ_embeddings.T)
             bi_dot_products = torch.matmul(succ_embeddings, pred_embeddings.T)
-            if self.use_factorized_linking:
+            geometry = None
+            if self.use_factorized_linking or self.use_visual_edge_residual or self.use_pairwise_relations:
                 available_words = min(num_words, input_data['word_geometries'].shape[1])
                 geometry = embeddings.new_zeros((num_words, 7))
                 geometry[:available_words] = input_data['word_geometries'][batch_idx, :available_words]
+            if self.use_visual_edge_residual:
+                edge_delta = self.visual_edge_scorer(sample_styles, geometry, visual_mask)
+                edge_scale = self.visual_edge_scale
+                dot_products = dot_products + edge_scale * edge_delta
+                bi_dot_products = bi_dot_products + edge_scale * edge_delta.T
+            if self.use_factorized_linking:
                 edge_delta = self.visual_edge_scorer(sample_styles, geometry, visual_mask)
                 dot_products = dot_products + edge_delta
                 bi_dot_products = bi_dot_products + edge_delta.T
@@ -252,9 +284,6 @@ class LightTextLinking(nn.Module):
                     predecessor_stop_logits, bi_dot_products
                 )
             if self.use_pairwise_relations and not self.use_factorized_linking:
-                available_words = min(num_words, input_data['word_geometries'].shape[1])
-                geometry = embeddings.new_zeros((num_words, 7))
-                geometry[:available_words] = input_data['word_geometries'][batch_idx, :available_words]
                 relation_bias = self.compute_relation_bias(geometry, sample_styles)
                 dot_products = dot_products + relation_bias
                 bi_dot_products = bi_dot_products + relation_bias.T

@@ -70,11 +70,16 @@ def validate(model, data_loader, device, log_writer, epoch=None):
             for k, loss in losses.items():
                 total_losses[k] += loss.item() / len(data_loader)
                 
-    val_loss = sum(total_losses.values())
+    if model.use_factorized_linking:
+        val_loss = sum(total_losses.values())
+    else:
+        # Preserve the original checkpoint-selection criterion for the joint
+        # successor model; auxiliary losses shape training but do not select it.
+        val_loss = total_losses['base_loss']
     for k, loss in total_losses.items():
         print(f"Epoch {epoch + 1}: Validation {k}: {loss}")
         log_writer.add_scalar(f"Loss/Val_{k}", loss, epoch)
-    print(f"Epoch {epoch + 1}: Validation total_loss: {val_loss}")
+    print(f"Epoch {epoch + 1}: Validation selection_loss: {val_loss}")
     return val_loss
 
 
@@ -148,6 +153,10 @@ def main():
         for k, loss in epoch_losses.items():
             print(f"Epoch {epoch + 1}: Training {k}: {loss}")
             log_writer.add_scalar(f"Loss/Train_{k}", loss, epoch)
+        if model.visual_edge_scale is not None:
+            visual_edge_scale = model.visual_edge_scale.detach().item()
+            print(f"Epoch {epoch + 1}: Visual edge residual scale: {visual_edge_scale:.6f}")
+            log_writer.add_scalar("Model/Visual_edge_scale", visual_edge_scale, epoch)
 
         ### save model
         if args.save_every_epoch > 0 and (epoch + 1) % args.save_every_epoch == 0:

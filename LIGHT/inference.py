@@ -165,7 +165,7 @@ def collect_visual_contributions(sample_data, full_logits, no_visual_logits):
             "image": sample_data['image_name'],
             "source_index": source_index,
             "source_text": words[source_word_id],
-            "has_visual": bool(visual_mask[source_index]),
+            "has_visual": bool(visual_mask[source_index]) if source_index < len(visual_mask) else False,
             "full_target_index": target_index,
             "full_target_text": words[target_word_id],
             "no_visual_target_index": no_visual_target_index,

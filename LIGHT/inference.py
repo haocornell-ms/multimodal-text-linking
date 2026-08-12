@@ -259,7 +259,8 @@ def main():
         "Inference visual settings: "
         f"use_word_style={getattr(args, 'use_word_style', False)}, "
         f"use_pairwise_relations={getattr(args, 'use_pairwise_relations', False)}, "
-        f"preserve_text_stop_scores={getattr(args, 'preserve_text_stop_scores', False)}"
+        f"preserve_text_stop_scores={getattr(args, 'preserve_text_stop_scores', False)}, "
+        f"use_factorized_linking={getattr(args, 'use_factorized_linking', False)}"
     )
 
     ### Load model ###

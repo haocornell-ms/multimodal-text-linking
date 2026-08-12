@@ -70,10 +70,11 @@ def validate(model, data_loader, device, log_writer, epoch=None):
             for k, loss in losses.items():
                 total_losses[k] += loss.item() / len(data_loader)
                 
-    val_loss = total_losses['base_loss']
+    val_loss = sum(total_losses.values())
     for k, loss in total_losses.items():
         print(f"Epoch {epoch + 1}: Validation {k}: {loss}")
         log_writer.add_scalar(f"Loss/Val_{k}", loss, epoch)
+    print(f"Epoch {epoch + 1}: Validation total_loss: {val_loss}")
     return val_loss
 
 
@@ -117,7 +118,7 @@ def main():
         patience=args.scheduler_patience, 
         factor=0.1, 
         threshold=0,
-        min_lr=0.000001, 
+        min_lr=[0.0000005, 0.000005],
         verbose=True)
     
     model.to(device)

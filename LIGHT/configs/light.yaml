@@ -3,9 +3,9 @@ _BASE_: "./base.yaml"
 # base settings
 output_dir: './_runs/'
 base_model: "light"
-exp_name: 'test'
+exp_name: 'factorized_visual'
 embedding_components: ["token", "poly"]
-aux_losses: ["bidirection", "focal", "style_contrastive"]
+aux_losses: ["bidirection"]
 
 # Word-aligned visual/style branch. Crops come from the original-resolution map.
 use_word_style: True
@@ -15,17 +15,16 @@ word_crop_context: 0.25
 word_crop_save_dir: "./word_crops"
 max_style_words: 256
 style_embedding_dim: 256
-# LayerNorm(text/style) -> concatenate -> MLP -> learned gated residual.
-style_fusion_hidden_dim: 768
-style_contrastive_weight: 0.1
-style_temperature: 0.1
+# Late fusion: preserve text embeddings, score visual candidate pairs directly,
+# and train explicit STOP/CONTINUE heads.
+use_factorized_linking: True
+visual_pair_dim: 32
+stop_loss_weight: 1.0
 
-# Keep diagonal/self-link (STOP) scores text/layout-only. Word visuals affect
-# only links between distinct words.
-preserve_text_stop_scores: True
-
-# Adds a learned directional geometry/style bias to the original dot-product score.
-use_pairwise_relations: True
+# Legacy fusion paths are disabled in factorized mode.
+use_pairwise_relations: False
+preserve_text_stop_scores: False
+style_contrastive_weight: 0.0
 
 token_padding_max_length: 1000
 padding_token_id: -100
@@ -47,7 +46,7 @@ val_data_shuffle: False
 save_every_epoch: 100
 eval_every_epoch: 1
 num_epochs: 100
-# Task heads, word-style encoder, and gated fusion learning rate.
+# Task heads, word-style encoder, edge scorer, and STOP-head learning rate.
 lr: 0.00005
 # Lower learning rate for the pretrained LIGHT backbone.
 backbone_lr: 0.000005
@@ -55,4 +54,4 @@ weight_decay: 0.0
 scheduler_patience: 5
 patience: 9
 
-version: 4
+version: 5

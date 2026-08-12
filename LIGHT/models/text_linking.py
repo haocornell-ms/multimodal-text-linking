@@ -70,6 +70,49 @@ class GatedStyleFusion(nn.Module):
         return text_embeddings + torch.sigmoid(self.gate(fused_input)) * style_delta
 
 
+class LateVisualEdgeScorer(nn.Module):
+    """Score visual compatibility without modifying text token embeddings."""
+    def __init__(self, style_dim=256, pair_dim=32, hidden_dim=128):
+        super().__init__()
+        self.style_projection = nn.Sequential(
+            nn.LayerNorm(style_dim), nn.Linear(style_dim, pair_dim), nn.GELU()
+        )
+        self.edge_mlp = nn.Sequential(
+            nn.LayerNorm(pair_dim * 4 + 11),
+            nn.Linear(pair_dim * 4 + 11, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        nn.init.normal_(self.edge_mlp[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.edge_mlp[-1].bias)
+
+    def forward(self, styles, geometry, visual_mask):
+        num_words = len(styles)
+        scores = styles.new_zeros((num_words, num_words))
+        valid_indices = visual_mask.nonzero(as_tuple=False).flatten()
+        if len(valid_indices) < 2:
+            return scores
+        style = self.style_projection(styles[valid_indices])
+        valid_geometry = geometry[valid_indices]
+        num_visual_words = len(style)
+        source_style = style[:, None, :].expand(-1, num_visual_words, -1)
+        target_style = style[None, :, :].expand(num_visual_words, -1, -1)
+        geometry_features = LightTextLinking.geometry_pair_features(valid_geometry)
+        pair_features = torch.cat((
+            source_style,
+            target_style,
+            (source_style - target_style).abs(),
+            source_style * target_style,
+            geometry_features,
+        ), dim=-1)
+        valid_scores = self.edge_mlp(pair_features).squeeze(-1)
+        off_diagonal = ~torch.eye(
+            num_visual_words, dtype=torch.bool, device=styles.device
+        )
+        valid_scores = valid_scores * off_diagonal.to(valid_scores.dtype)
+        scores[valid_indices[:, None], valid_indices[None, :]] = valid_scores
+        return scores
+
+
 class LightTextLinking(nn.Module):
     def __init__(self, args):
         super(LightTextLinking, self).__init__()
@@ -85,6 +128,11 @@ class LightTextLinking(nn.Module):
         self.style_temperature = getattr(args, "style_temperature", 0.1)
         self.style_dim = getattr(args, "style_embedding_dim", 256)
         self.style_fusion_hidden_dim = getattr(args, "style_fusion_hidden_dim", self.emb_dim)
+        self.use_factorized_linking = getattr(args, "use_factorized_linking", False)
+        self.stop_loss_weight = getattr(args, "stop_loss_weight", 1.0)
+        self.visual_pair_dim = getattr(args, "visual_pair_dim", 32)
+        if self.use_factorized_linking and not self.use_word_style:
+            raise ValueError("use_factorized_linking requires use_word_style=True")
 
         self.config = LayoutLMv3Config(max_position_embeddings=self.max_position_embeddings)
         self.light = LightModel(self.config)
@@ -92,11 +140,23 @@ class LightTextLinking(nn.Module):
 
         if self.use_word_style:
             self.word_style_encoder = WordStyleEncoder(output_dim=self.style_dim)
-            self.style_fusion = GatedStyleFusion(
-                text_dim=self.emb_dim,
-                style_dim=self.style_dim,
-                hidden_dim=self.style_fusion_hidden_dim,
-            )
+            if self.use_factorized_linking:
+                self.visual_edge_scorer = LateVisualEdgeScorer(
+                    style_dim=self.style_dim, pair_dim=self.visual_pair_dim
+                )
+                stop_input_dim = self.emb_dim + self.visual_pair_dim + 4
+                self.stop_style_projection = nn.Sequential(
+                    nn.LayerNorm(self.style_dim),
+                    nn.Linear(self.style_dim, self.visual_pair_dim), nn.GELU(),
+                )
+                self.successor_stop_head = self._make_stop_head(stop_input_dim)
+                self.predecessor_stop_head = self._make_stop_head(stop_input_dim)
+            else:
+                self.style_fusion = GatedStyleFusion(
+                    text_dim=self.emb_dim,
+                    style_dim=self.style_dim,
+                    hidden_dim=self.style_fusion_hidden_dim,
+                )
 
         if self.use_pairwise_relations:
             self.relation_mlp = nn.Sequential(
@@ -145,16 +205,17 @@ class LightTextLinking(nn.Module):
 
             num_words = embeddings.shape[0]
             sample_styles = None
+            visual_mask = torch.zeros(num_words, dtype=torch.bool, device=embeddings.device)
             if style_embeddings is not None:
                 available_words = min(num_words, style_embeddings.shape[1])
                 sample_styles = embeddings.new_zeros((num_words, self.style_dim))
                 sample_styles[:available_words] = style_embeddings[batch_idx, :available_words]
-                visual_mask = torch.zeros(num_words, dtype=torch.bool, device=embeddings.device)
                 visual_mask[:available_words] = input_data['word_visual_mask'][batch_idx, :available_words]
-                fused_embeddings = self.style_fusion(embeddings, sample_styles)
-                embeddings = torch.where(
-                    visual_mask.unsqueeze(-1), fused_embeddings, embeddings
-                )
+                if not self.use_factorized_linking:
+                    fused_embeddings = self.style_fusion(embeddings, sample_styles)
+                    embeddings = torch.where(
+                        visual_mask.unsqueeze(-1), fused_embeddings, embeddings
+                    )
 
             text_stop_logits = None
             if self.use_word_style and self.preserve_text_stop_scores:
@@ -169,14 +230,35 @@ class LightTextLinking(nn.Module):
         
             dot_products = torch.matmul(pred_embeddings, succ_embeddings.T)
             bi_dot_products = torch.matmul(succ_embeddings, pred_embeddings.T)
-            if self.use_pairwise_relations:
+            if self.use_factorized_linking:
+                available_words = min(num_words, input_data['word_geometries'].shape[1])
+                geometry = embeddings.new_zeros((num_words, 7))
+                geometry[:available_words] = input_data['word_geometries'][batch_idx, :available_words]
+                edge_delta = self.visual_edge_scorer(sample_styles, geometry, visual_mask)
+                dot_products = dot_products + edge_delta
+                bi_dot_products = bi_dot_products + edge_delta.T
+                successor_stop_logits = self.compute_stop_logits(
+                    self.successor_stop_head, text_embeddings, sample_styles,
+                    visual_mask, dot_products
+                )
+                predecessor_stop_logits = self.compute_stop_logits(
+                    self.predecessor_stop_head, text_embeddings, sample_styles,
+                    visual_mask, bi_dot_products
+                )
+                dot_products = self.combine_factorized_logits(
+                    successor_stop_logits, dot_products
+                )
+                bi_dot_products = self.combine_factorized_logits(
+                    predecessor_stop_logits, bi_dot_products
+                )
+            if self.use_pairwise_relations and not self.use_factorized_linking:
                 available_words = min(num_words, input_data['word_geometries'].shape[1])
                 geometry = embeddings.new_zeros((num_words, 7))
                 geometry[:available_words] = input_data['word_geometries'][batch_idx, :available_words]
                 relation_bias = self.compute_relation_bias(geometry, sample_styles)
                 dot_products = dot_products + relation_bias
                 bi_dot_products = bi_dot_products + relation_bias.T
-            if text_stop_logits is not None:
+            if text_stop_logits is not None and not self.use_factorized_linking:
                 # A diagonal entry means STOP. Keep that decision grounded in
                 # the text/layout representation; visual features may only
                 # change scores between distinct words.
@@ -195,12 +277,15 @@ class LightTextLinking(nn.Module):
 
             if return_loss:
                 lables_B = [input_data['labels'][batch_idx][i] for i in first_token_indices]
-                losses = self.compute_sample_losses(lables_B, dot_products, bi_dot_products)
-                all_losses['base_loss'] += losses['base_loss']
-                if 'bidirection' in self.aux_losses:
-                    all_losses['bidirection'] += losses['bidirection']
-                if 'focal' in self.aux_losses:
-                    all_losses['focal_loss'] += losses['focal_loss']
+                if self.use_factorized_linking:
+                    losses = self.compute_factorized_losses(
+                        lables_B, dot_products, bi_dot_products,
+                        successor_stop_logits, predecessor_stop_logits,
+                    )
+                else:
+                    losses = self.compute_sample_losses(lables_B, dot_products, bi_dot_products)
+                for loss_name, loss_value in losses.items():
+                    all_losses[loss_name] += loss_value
                 if (self.use_word_style and self.style_contrastive_weight > 0
                         and ('style_contrastive' in self.aux_losses or 'style' in self.aux_losses)):
                     valid_styles = sample_styles[visual_mask]
@@ -209,6 +294,66 @@ class LightTextLinking(nn.Module):
                     all_losses['style_contrastive'] += self.style_contrastive_weight * style_loss
             
         return all_logits, all_losses
+
+    @staticmethod
+    def _make_stop_head(input_dim):
+        return nn.Sequential(
+            nn.LayerNorm(input_dim), nn.Linear(input_dim, 256), nn.GELU(),
+            nn.Linear(256, 1),
+        )
+
+    @staticmethod
+    def geometry_pair_features(geometry):
+        eps = 1e-6
+        source, target = geometry[:, None, :], geometry[None, :, :]
+        dx = target[..., 0] - source[..., 0]
+        dy = target[..., 1] - source[..., 1]
+        mean_height = 0.5 * (source[..., 3] + target[..., 3]).clamp_min(eps)
+        ndx, ndy = dx / mean_height, dy / mean_height
+        distance = torch.sqrt(ndx.square() + ndy.square() + eps)
+        direction_x, direction_y = ndx / distance, ndy / distance
+        return torch.stack((
+            ndx, ndy, distance, direction_x, direction_y,
+            torch.log((target[..., 2] + eps) / (source[..., 2] + eps)),
+            torch.log((target[..., 3] + eps) / (source[..., 3] + eps)),
+            torch.log((target[..., 4] + eps) / (source[..., 4] + eps)),
+            source[..., 5] * target[..., 5] + source[..., 6] * target[..., 6],
+            direction_x * source[..., 6] + direction_y * source[..., 5],
+            direction_x * target[..., 6] + direction_y * target[..., 5],
+        ), dim=-1)
+
+    def compute_stop_logits(self, head, text, styles, visual_mask, edge_scores):
+        style = self.stop_style_projection(styles)
+        style = style * visual_mask.unsqueeze(-1).to(style.dtype)
+        num_words = edge_scores.shape[0]
+        if num_words > 1:
+            non_self = edge_scores.masked_fill(
+                torch.eye(num_words, dtype=torch.bool, device=edge_scores.device),
+                float('-inf'),
+            )
+            top_k = min(3, num_words - 1)
+            top_values = non_self.topk(top_k, dim=-1).values
+            evidence = torch.stack((
+                top_values[:, 0], top_values.mean(-1),
+                edge_scores.diagonal(),
+                top_values[:, 0] - edge_scores.diagonal(),
+            ), dim=-1)
+        else:
+            evidence = edge_scores.new_zeros((1, 4))
+        features = torch.cat((F.layer_norm(text, (text.shape[-1],)), style, evidence), dim=-1)
+        return head(features).squeeze(-1)
+
+    @staticmethod
+    def combine_factorized_logits(stop_logits, edge_scores):
+        """Return log P(STOP) on diagonal and log P(CONTINUE,target) elsewhere."""
+        num_words = edge_scores.shape[0]
+        if num_words == 1:
+            return F.logsigmoid(stop_logits).reshape(1, 1)
+        diagonal = torch.eye(num_words, dtype=torch.bool, device=edge_scores.device)
+        non_stop_scores = edge_scores.masked_fill(diagonal, float('-inf'))
+        conditional_log_probs = F.log_softmax(non_stop_scores, dim=-1)
+        combined = F.logsigmoid(-stop_logits)[:, None] + conditional_log_probs
+        return torch.where(diagonal, F.logsigmoid(stop_logits)[:, None], combined)
 
     def encode_styles(self, input_data):
         """Encode only real crops, avoiding CNN work on padded word slots."""
@@ -278,6 +423,65 @@ class LightTextLinking(nn.Module):
             positives.sum(dim=1).clamp_min(1).to(logits.dtype)
         )
         return -mean_positive_log_probability[valid_anchors].mean()
+
+    @staticmethod
+    def build_link_targets(labels):
+        label_to_index = {label.item(): index for index, label in enumerate(labels)}
+        next_targets, previous_targets = [], []
+        for index, label_tensor in enumerate(labels):
+            label = label_tensor.item()
+            group_id, sequence_id = str(label).split('000', 1)
+            next_label = int(f"{int(group_id)}000{int(sequence_id) + 1}")
+            previous_label = int(f"{int(group_id)}000{int(sequence_id) - 1}")
+            next_targets.append(label_to_index.get(next_label, index))
+            previous_targets.append(label_to_index.get(previous_label, index))
+        device = labels[0].device
+        return (
+            torch.tensor(next_targets, dtype=torch.long, device=device),
+            torch.tensor(previous_targets, dtype=torch.long, device=device),
+        )
+
+    def compute_factorized_direction_loss(self, combined_logits, stop_logits, targets):
+        source_indices = torch.arange(len(targets), device=targets.device)
+        stop_targets = targets.eq(source_indices)
+        stop_loss = F.binary_cross_entropy_with_logits(
+            stop_logits, stop_targets.to(stop_logits.dtype)
+        )
+        continue_mask = ~stop_targets
+        if continue_mask.any():
+            successor_loss = F.nll_loss(
+                combined_logits[continue_mask], targets[continue_mask]
+            )
+            # Remove the CONTINUE term already present in the combined log
+            # probability, leaving only P(target | CONTINUE).
+            successor_loss = successor_loss + F.logsigmoid(
+                -stop_logits[continue_mask]
+            ).mean()
+        else:
+            successor_loss = stop_logits.new_zeros(())
+        return successor_loss, stop_loss
+
+    def compute_factorized_losses(self, labels, logits, bi_logits,
+                                  stop_logits, predecessor_stop_logits):
+        if not isinstance(labels, torch.Tensor):
+            labels = torch.stack(labels)
+        next_targets, previous_targets = self.build_link_targets(labels)
+        successor_loss, stop_loss = self.compute_factorized_direction_loss(
+            logits, stop_logits, next_targets
+        )
+        losses = {
+            'base_loss': successor_loss,
+            'stop_loss': self.stop_loss_weight * stop_loss,
+        }
+        if 'bidirection' in self.aux_losses:
+            predecessor_loss, predecessor_stop_loss = self.compute_factorized_direction_loss(
+                bi_logits, predecessor_stop_logits, previous_targets
+            )
+            losses['bidirection'] = predecessor_loss
+            losses['predecessor_stop_loss'] = (
+                self.stop_loss_weight * predecessor_stop_loss
+            )
+        return losses
 
 
     def compute_sample_losses(self, labels, dot_products, bi_dot_products):

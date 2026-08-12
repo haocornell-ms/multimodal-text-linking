@@ -144,6 +144,84 @@ def top_k_successor_predictions(words, polygons, word_ids, probabilities,
     return predictions
 
 
+def collect_visual_contributions(sample_data, full_logits, no_visual_logits):
+    """Compare each successor decision with and without word-level visuals."""
+    full_probabilities = torch.softmax(full_logits, dim=-1)
+    no_visual_probabilities = torch.softmax(no_visual_logits, dim=-1)
+    full_targets = full_logits.argmax(dim=-1)
+    no_visual_targets = no_visual_logits.argmax(dim=-1)
+    word_ids = sample_data['ori_word_ids']
+    words = sample_data['ori_words']
+    visual_mask = sample_data['word_visual_mask'].bool()
+
+    records = []
+    for source_index in range(full_logits.shape[0]):
+        target_index = int(full_targets[source_index])
+        no_visual_target_index = int(no_visual_targets[source_index])
+        source_word_id = int(word_ids[source_index])
+        target_word_id = int(word_ids[target_index])
+        no_visual_target_word_id = int(word_ids[no_visual_target_index])
+        records.append({
+            "image": sample_data['image_name'],
+            "source_index": source_index,
+            "source_text": words[source_word_id],
+            "has_visual": bool(visual_mask[source_index]),
+            "full_target_index": target_index,
+            "full_target_text": words[target_word_id],
+            "no_visual_target_index": no_visual_target_index,
+            "no_visual_target_text": words[no_visual_target_word_id],
+            "target_changed": target_index != no_visual_target_index,
+            # Positive values mean visual inputs increased support for the
+            # target selected by the full model.
+            "selected_logit_delta": float(
+                full_logits[source_index, target_index]
+                - no_visual_logits[source_index, target_index]
+            ),
+            "selected_probability_delta": float(
+                full_probabilities[source_index, target_index]
+                - no_visual_probabilities[source_index, target_index]
+            ),
+            "full_probability": float(full_probabilities[source_index, target_index]),
+            "no_visual_probability": float(
+                no_visual_probabilities[source_index, target_index]
+            ),
+        })
+    return records
+
+
+def print_visual_contribution_summary(records, max_examples):
+    if not records:
+        print("Visual contribution stats: no word predictions were available.")
+        return
+    changed = sum(record["target_changed"] for record in records)
+    visual_records = [record for record in records if record["has_visual"]]
+    mean_abs_logit_delta = np.mean([
+        abs(record["selected_logit_delta"]) for record in records
+    ])
+    mean_abs_probability_delta = np.mean([
+        abs(record["selected_probability_delta"]) for record in records
+    ])
+    print("\nVisual contribution summary (full model vs word visuals disabled)")
+    print(f"  words: {len(records)} ({len(visual_records)} with a valid visual crop)")
+    print(f"  top-1 target changed: {changed}/{len(records)} ({changed / len(records):.2%})")
+    print(f"  mean |selected logit delta|: {mean_abs_logit_delta:.6f}")
+    print(f"  mean |selected probability delta|: {mean_abs_probability_delta:.6f}")
+
+    ranked_records = sorted(
+        records,
+        key=lambda record: abs(record["selected_probability_delta"]),
+        reverse=True,
+    )[:max_examples]
+    print(f"  largest {len(ranked_records)} per-word effects:")
+    for record in ranked_records:
+        print(
+            f"    {record['image']} | {record['source_text']!r}: "
+            f"{record['no_visual_target_text']!r} -> {record['full_target_text']!r}; "
+            f"delta_logit={record['selected_logit_delta']:+.4f}, "
+            f"delta_prob={record['selected_probability_delta']:+.4f}"
+        )
+
+
 def main():
     # python inference.py --test_dataset test --out_file lithium.json --model_dir _runs/best/ --anno_path /home/yaoyi/shared/critical-maas/12month-text-extraction/spot/lithium.json  --img_dir /home/yaoyi/shared/critical-maas/12month-text-extraction/img_crops/lithium
     
@@ -160,6 +238,14 @@ def main():
     parser.add_argument(
         '--top_k', type=int, default=3,
         help='Number of successor candidates dumped per word (default: 3).'
+    )
+    parser.add_argument(
+        '--visual_contribution_stats', action='store_true',
+        help='Compare predictions with word-level visual features enabled and disabled.'
+    )
+    parser.add_argument(
+        '--visual_contribution_examples', type=int, default=20,
+        help='Number of strongest visual effects printed (default: 20).'
     )
     args, remaining_args = parser.parse_known_args()
     
@@ -189,6 +275,7 @@ def main():
     with torch.no_grad():
         result_list = []
         probability_result_list = []
+        visual_contribution_records = []
         for i in tqdm(range(len(test_dataset)), total=len(test_dataset)):
             sample_data = test_dataset[i]
             if sample_data is None:
@@ -202,6 +289,18 @@ def main():
             input_data.pop('ori_word_ids')
             input_data = {k: v.unsqueeze(0).to(device) for k, v in input_data.items()}
             all_logits, _ = model(input_data, return_loss=False)
+
+            if args.visual_contribution_stats:
+                no_visual_input_data = input_data.copy()
+                no_visual_input_data['word_visual_mask'] = torch.zeros_like(
+                    input_data['word_visual_mask']
+                )
+                no_visual_logits, _ = model(no_visual_input_data, return_loss=False)
+                visual_contribution_records.extend(collect_visual_contributions(
+                    sample_data,
+                    all_logits['logits'][0],
+                    no_visual_logits['logits'][0],
+                ))
             
             probabilities = torch.softmax(all_logits['logits'][0], dim=-1)
             bi_probabilities = torch.softmax(all_logits['bi_logits'][0], dim=-1)
@@ -257,6 +356,12 @@ def main():
             with open(probability_output_path, 'w') as f:
                 json.dump(probability_result_list, f, indent=4)
             print(f"Saved top-{args.top_k} probabilities to {probability_output_path}")
+
+        if args.visual_contribution_stats:
+            print_visual_contribution_summary(
+                visual_contribution_records,
+                args.visual_contribution_examples,
+            )
 
     if 'MapText' in args.test_dataset:
         gt_path = DATASET_META['MapText_test']['anno_path']

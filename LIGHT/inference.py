@@ -255,6 +255,12 @@ def main():
     for key, value in config.items():
         parser.add_argument(f'--{key}', type=type(value), default=value)
     args = parser.parse_args()
+    print(
+        "Inference visual settings: "
+        f"use_word_style={getattr(args, 'use_word_style', False)}, "
+        f"use_pairwise_relations={getattr(args, 'use_pairwise_relations', False)}, "
+        f"preserve_text_stop_scores={getattr(args, 'preserve_text_stop_scores', False)}"
+    )
 
     ### Load model ###
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

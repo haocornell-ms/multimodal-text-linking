@@ -20,6 +20,10 @@ style_fusion_hidden_dim: 768
 style_contrastive_weight: 0.1
 style_temperature: 0.1
 
+# Keep diagonal/self-link (STOP) scores text/layout-only. Word visuals affect
+# only links between distinct words.
+preserve_text_stop_scores: True
+
 # Adds a learned directional geometry/style bias to the original dot-product score.
 use_pairwise_relations: True
 

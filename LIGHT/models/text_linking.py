@@ -80,6 +80,7 @@ class LightTextLinking(nn.Module):
         self.token_padding_max_length = getattr(args, "token_padding_max_length", 1000)
         self.use_word_style = getattr(args, "use_word_style", False)
         self.use_pairwise_relations = getattr(args, "use_pairwise_relations", False)
+        self.preserve_text_stop_scores = getattr(args, "preserve_text_stop_scores", False)
         self.style_contrastive_weight = getattr(args, "style_contrastive_weight", 0.1)
         self.style_temperature = getattr(args, "style_temperature", 0.1)
         self.style_dim = getattr(args, "style_embedding_dim", 256)
@@ -140,6 +141,7 @@ class LightTextLinking(nn.Module):
 
             embeddings = token_embeddings[batch_idx][first_token_indices]
             embeddings = self.token_encoder(embeddings)
+            text_embeddings = embeddings
 
             num_words = embeddings.shape[0]
             sample_styles = None
@@ -153,6 +155,14 @@ class LightTextLinking(nn.Module):
                 embeddings = torch.where(
                     visual_mask.unsqueeze(-1), fused_embeddings, embeddings
                 )
+
+            text_stop_logits = None
+            if self.use_word_style and self.preserve_text_stop_scores:
+                text_pred_embeddings = self.predecessor_mlp(text_embeddings)
+                text_succ_embeddings = self.successor_mlp(text_embeddings)
+                text_stop_logits = (
+                    text_pred_embeddings * text_succ_embeddings
+                ).sum(dim=-1)
             
             pred_embeddings = self.predecessor_mlp(embeddings)
             succ_embeddings = self.successor_mlp(embeddings)
@@ -166,6 +176,20 @@ class LightTextLinking(nn.Module):
                 relation_bias = self.compute_relation_bias(geometry, sample_styles)
                 dot_products = dot_products + relation_bias
                 bi_dot_products = bi_dot_products + relation_bias.T
+            if text_stop_logits is not None:
+                # A diagonal entry means STOP. Keep that decision grounded in
+                # the text/layout representation; visual features may only
+                # change scores between distinct words.
+                diagonal_mask = torch.eye(
+                    num_words, dtype=torch.bool, device=embeddings.device
+                )
+                text_stop_matrix = torch.diag_embed(text_stop_logits)
+                dot_products = torch.where(
+                    diagonal_mask, text_stop_matrix, dot_products
+                )
+                bi_dot_products = torch.where(
+                    diagonal_mask, text_stop_matrix, bi_dot_products
+                )
             all_logits['logits'].append(dot_products)
             all_logits['bi_logits'].append(bi_dot_products)
 

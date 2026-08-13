@@ -4,13 +4,26 @@ import math
 import os
 from collections import defaultdict
 
-import joblib
 import numpy as np
+import torch
+import torch.nn as nn
 from PIL import Image
-from sklearn.ensemble import HistGradientBoostingClassifier
 
 from analyze_topk_headroom import build_ground_truth, image_key, match_item
 from dataset.dataset import extract_word_visual_features
+
+
+class PairVerifier(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, 128), nn.GELU(), nn.Dropout(0.15),
+            nn.Linear(128, 64), nn.GELU(), nn.Dropout(0.10),
+            nn.Linear(64, 1),
+        )
+
+    def forward(self, features):
+        return self.network(features).squeeze(-1)
 
 
 def center(vertices):
@@ -196,16 +209,59 @@ def main():
 
     train = build_dataset(args.train_predictions, args.train_gt, args.train_images)
     val = build_dataset(args.val_predictions, args.val_gt, args.val_images)
-    positive_weight = max((~train[1].astype(bool)).sum() / max(train[1].sum(), 1), 1.0)
-    sample_weight = np.where(train[1] == 1, positive_weight, 1.0)
-    classifier = HistGradientBoostingClassifier(
-        learning_rate=0.06, max_iter=250, max_leaf_nodes=31,
-        l2_regularization=1.0, random_state=1234,
+    torch.manual_seed(1234)
+    feature_mean = train[0].mean(axis=0)
+    feature_std = train[0].std(axis=0).clip(min=1e-5)
+    train_features = torch.from_numpy((train[0] - feature_mean) / feature_std)
+    train_labels = torch.from_numpy(train[1].astype(np.float32))
+    val_features = torch.from_numpy((val[0] - feature_mean) / feature_std)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = PairVerifier(train_features.shape[1]).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-3)
+    positive_weight = max((train[1] == 0).sum() / max((train[1] == 1).sum(), 1), 1.0)
+    loss_function = nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor(positive_weight, device=device)
     )
-    classifier.fit(train[0], train[1], sample_weight=sample_weight)
-    probabilities = classifier.predict_proba(val[0])[:, 1]
-    report = evaluate_interventions(probabilities, val[1], val[2], val[3])
-    joblib.dump({'classifier': classifier, 'report': report}, args.model_out)
+    generator = torch.Generator().manual_seed(1234)
+    loader = torch.utils.data.DataLoader(
+        torch.utils.data.TensorDataset(train_features, train_labels),
+        batch_size=2048, shuffle=True, generator=generator,
+    )
+    best_state, best_accuracy, stale_epochs = None, -1.0, 0
+    for epoch in range(100):
+        model.train()
+        for features, labels in loader:
+            features, labels = features.to(device), labels.to(device)
+            optimizer.zero_grad()
+            loss = loss_function(model(features), labels)
+            loss.backward()
+            optimizer.step()
+        model.eval()
+        with torch.no_grad():
+            probabilities = torch.sigmoid(model(val_features.to(device))).cpu().numpy()
+        report = evaluate_interventions(probabilities, val[1], val[2], val[3])
+        if report['accuracy'] > best_accuracy + 1e-5:
+            best_accuracy = report['accuracy']
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+            best_report = report
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+        print(f"Epoch {epoch + 1}: verifier best accuracy={best_accuracy:.4%}")
+        if stale_epochs >= 10:
+            break
+    model.load_state_dict(best_state)
+    report = best_report
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'input_dim': train_features.shape[1],
+        'feature_mean': feature_mean,
+        'feature_std': feature_std,
+        'report': report,
+    }, args.model_out)
     with open(args.report_out, 'w') as file:
         json.dump(report, file, indent=2)
 

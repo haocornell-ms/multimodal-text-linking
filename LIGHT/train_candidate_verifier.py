@@ -116,7 +116,7 @@ def build_dataset(prediction_path, annotation_path, image_dir):
         predictions = json.load(file)
     with open(annotation_path) as file:
         truth = build_ground_truth(json.load(file))
-    vectors, labels, groups, baseline_correct = [], [], [], [], []
+    vectors, labels, groups, baseline_correct = [], [], [], []
     group_id = 0
     for image in predictions:
         words = image['words']

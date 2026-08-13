@@ -85,6 +85,14 @@ def set_pretrained_base_trainable(model, trainable):
             parameter.requires_grad = trainable
 
 
+def set_pretrained_base_eval(model):
+    """Keep dropout and other training-time behavior off in the frozen base."""
+    visual_modules = {"word_style_encoder", "visual_edge_scorer"}
+    for name, module in model.named_children():
+        if name not in visual_modules:
+            module.eval()
+
+
 def validate(model, data_loader, device, log_writer, epoch=None):
     model.eval()
     total_losses = defaultdict(int)
@@ -153,7 +161,11 @@ def main():
 
     optimizer = build_optimizer(model, args)
     freeze_base_epochs = getattr(args, "freeze_base_epochs", 0)
-    if freeze_base_epochs > 0:
+    freeze_pretrained_base = getattr(args, "freeze_pretrained_base", False)
+    if freeze_pretrained_base:
+        set_pretrained_base_trainable(model, False)
+        print("Freezing pretrained baseline for the entire training run")
+    elif freeze_base_epochs > 0:
         set_pretrained_base_trainable(model, False)
         print(f"Freezing pretrained baseline for {freeze_base_epochs} epochs")
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -177,10 +189,14 @@ def main():
         )
     
     for epoch in range(args.num_epochs):
-        if epoch == freeze_base_epochs and freeze_base_epochs > 0:
+        if (not freeze_pretrained_base
+                and epoch == freeze_base_epochs
+                and freeze_base_epochs > 0):
             set_pretrained_base_trainable(model, True)
             print(f"Epoch {epoch + 1}: Unfroze pretrained baseline parameters")
         model.train()
+        if freeze_pretrained_base:
+            set_pretrained_base_eval(model)
         train_dataset.reset()
         
         epoch_losses = defaultdict(int)

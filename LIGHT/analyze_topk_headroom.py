@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import math
 from collections import Counter
 
 
@@ -20,18 +21,44 @@ def image_key(name):
     return os.path.basename(name)
 
 
+def centroid(vertices):
+    points = vertices
+    if points and not isinstance(points[0], (list, tuple)):
+        points = list(zip(points[::2], points[1::2]))
+    return (
+        sum(float(point[0]) for point in points) / len(points),
+        sum(float(point[1]) for point in points) / len(points),
+    )
+
+
+def normalized_text(text):
+    return ''.join(str(text).lower().split())
+
+
 def build_ground_truth(annotation):
     images = {}
     for image in annotation:
-        successors = {}
+        items = []
         for group in image['groups']:
             retained = [item for item in group if not item.get('illegible', False)]
             for index, item in enumerate(retained):
-                source = polygon_key(item['vertices'])
                 target_item = retained[index + 1] if index + 1 < len(retained) else item
-                successors[source] = polygon_key(target_item['vertices'])
-        images[image_key(image['image'])] = successors
+                items.append({
+                    'text': normalized_text(item.get('text', '')),
+                    'center': centroid(item['vertices']),
+                    'target_center': centroid(target_item['vertices']),
+                    'is_stop': target_item is item,
+                })
+        images[image_key(image['image'])] = items
     return images
+
+
+def match_item(text, vertices, items):
+    center = centroid(vertices)
+    normalized = normalized_text(text)
+    same_text = [item for item in items if item['text'] == normalized]
+    candidates = same_text or items
+    return min(candidates, key=lambda item: math.dist(center, item['center']))
 
 
 def analyze(annotation, predictions, max_k):
@@ -45,19 +72,17 @@ def analyze(annotation, predictions, max_k):
             missing_images.add(image_key(image['image']))
             continue
         for word in image['words']:
-            source = polygon_key(word['source_vertices'])
-            target = image_truth.get(source)
-            if target is None:
-                counts['unmatched_source'] += 1
-                continue
-            is_stop = source == target
+            source_item = match_item(word['source_text'], word['source_vertices'], image_truth)
+            target = source_item['target_center']
+            is_stop = source_item['is_stop']
             category = 'stop' if is_stop else 'continue'
             counts['total'] += 1
             counts[category] += 1
-            candidate_keys = [
-                polygon_key(candidate['target_vertices'])
+            candidate_items = [
+                match_item(candidate['target_text'], candidate['target_vertices'], image_truth)
                 for candidate in word['top_successors'][:max_k]
             ]
+            candidate_keys = [item['center'] for item in candidate_items]
             try:
                 rank = candidate_keys.index(target) + 1
             except ValueError:

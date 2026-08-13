@@ -5,7 +5,10 @@ output_dir: './_runs/'
 base_model: "light"
 exp_name: 'visual_edge_residual_baseline_init'
 embedding_components: ["token", "poly"]
-aux_losses: ["bidirection", "focal"]
+# With the pretrained baseline frozen, optimize the visual residual against the
+# same forward/reverse successor cross-entropy used for checkpoint selection.
+# The dense focal objective dominated v9 and degraded both directional losses.
+aux_losses: ["bidirection"]
 
 # Word-aligned visual/style branch. Crops come from the original-resolution map.
 use_word_style: True
@@ -71,5 +74,6 @@ min_epochs_before_early_stop: 30
 scheduler_patience: 10
 patience: 20
 
-# Keep the completed v7/v8 runs intact; this is the visual-only training run.
-version: 9
+# Keep the completed v7-v9 runs intact; this is visual-only training without
+# the conflicting focal objective.
+version: 10

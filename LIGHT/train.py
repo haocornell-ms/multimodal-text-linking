@@ -169,6 +169,12 @@ def main():
     ###
     ### training
     best_val_loss, epochs_no_improve = np.inf, 0
+    min_epochs_before_early_stop = getattr(args, "min_epochs_before_early_stop", 0)
+    if min_epochs_before_early_stop > 0:
+        print(
+            "Early stopping disabled for the first "
+            f"{min_epochs_before_early_stop} epochs"
+        )
     
     for epoch in range(args.num_epochs):
         if epoch == freeze_base_epochs and freeze_base_epochs > 0:
@@ -221,7 +227,12 @@ def main():
             scheduler.step(val_loss)
 
         ### terminate
-        if epochs_no_improve >= args.patience or epoch == args.num_epochs - 1:
+        completed_epochs = epoch + 1
+        patience_exhausted = (
+            completed_epochs >= min_epochs_before_early_stop
+            and epochs_no_improve >= args.patience
+        )
+        if patience_exhausted or epoch == args.num_epochs - 1:
             base_comm = ("python inference.py --test_dataset MapText_test "
                          "--out_file predict.json --model_dir {model_dir} "
                          "--anno_path {anno_path} --img_dir {img_dir}")

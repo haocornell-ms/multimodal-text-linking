@@ -51,7 +51,7 @@ train_data_probabilities: [1]
 val_dataset: "MapText_val"
 val_data_shuffle: False
 
-save_every_epoch: 100
+save_every_epoch: 10
 eval_every_epoch: 1
 num_epochs: 100
 # Task heads, word-style encoder, and edge scorer learning rate.
@@ -61,7 +61,12 @@ backbone_lr: 0.000005
 # Existing token/linking/relation heads loaded from the text-only baseline.
 base_task_lr: 0.000005
 weight_decay: 0.0
-scheduler_patience: 5
-patience: 9
+# Give the scratch visual residual enough time to learn before validation-loss
+# early stopping is allowed. After epoch 30, tolerate 20 consecutive validation
+# checks without a new best checkpoint.
+min_epochs_before_early_stop: 30
+scheduler_patience: 10
+patience: 20
 
-version: 7
+# Keep the completed v7 run intact; this is its longer-training successor.
+version: 8

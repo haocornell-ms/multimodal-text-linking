@@ -251,6 +251,10 @@ def main():
         '--disable_word_visuals', action='store_true',
         help='Disable word-crop/style inputs for the main saved predictions.'
     )
+    parser.add_argument(
+        '--skip_evaluation', action='store_true',
+        help='Write predictions without invoking the external test evaluator.'
+    )
     args, remaining_args = parser.parse_known_args()
     
     with open(os.path.join(args.model_dir, 'config.yaml'), 'r') as f:
@@ -383,6 +387,8 @@ def main():
                 args.visual_contribution_examples,
             )
 
+    if args.skip_evaluation:
+        return
     if 'MapText' in args.test_dataset:
         gt_path = DATASET_META['MapText_test']['anno_path']
     # if 'HierText' in args.test_dataset:

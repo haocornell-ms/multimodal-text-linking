@@ -30,20 +30,33 @@ def count_parameters(model, trainable_only=True):
 
 
 def build_optimizer(model, args):
-    """Use a conservative LR for pretrained LIGHT and a larger LR elsewhere."""
+    """Use conservative LRs for pretrained modules and a larger visual LR."""
+    visual_prefixes = (
+        "word_style_encoder.",
+        "visual_edge_scorer.",
+        "visual_edge_scale_logit",
+    )
     backbone_parameters = [
         parameter for parameter in model.light.parameters() if parameter.requires_grad
     ]
     backbone_parameter_ids = {id(parameter) for parameter in backbone_parameters}
+    visual_parameters = [
+        parameter for name, parameter in model.named_parameters()
+        if parameter.requires_grad and name.startswith(visual_prefixes)
+    ]
+    visual_parameter_ids = {id(parameter) for parameter in visual_parameters}
     task_parameters = [
-        parameter for parameter in model.parameters()
-        if parameter.requires_grad and id(parameter) not in backbone_parameter_ids
+        parameter for parameter in model.parameters() if parameter.requires_grad
+        and id(parameter) not in backbone_parameter_ids
+        and id(parameter) not in visual_parameter_ids
     ]
 
     backbone_lr = getattr(args, "backbone_lr", args.lr)
+    base_task_lr = getattr(args, "base_task_lr", backbone_lr)
     parameter_groups = [
         {"params": backbone_parameters, "lr": backbone_lr, "name": "light_backbone"},
-        {"params": task_parameters, "lr": args.lr, "name": "task_and_visual"},
+        {"params": task_parameters, "lr": base_task_lr, "name": "base_linking_heads"},
+        {"params": visual_parameters, "lr": args.lr, "name": "visual_residual"},
     ]
     parameter_groups = [group for group in parameter_groups if group["params"]]
     optimizer = AdamW(
@@ -58,6 +71,18 @@ def build_optimizer(model, args):
             f"lr={group['lr']:.2e}"
         )
     return optimizer
+
+
+def set_pretrained_base_trainable(model, trainable):
+    """Freeze/unfreeze everything except the newly introduced visual branch."""
+    visual_prefixes = (
+        "word_style_encoder.",
+        "visual_edge_scorer.",
+        "visual_edge_scale_logit",
+    )
+    for name, parameter in model.named_parameters():
+        if not name.startswith(visual_prefixes):
+            parameter.requires_grad = trainable
 
 
 def validate(model, data_loader, device, log_writer, epoch=None):
@@ -106,7 +131,16 @@ def main():
     ###
     ### model
     model = LightTextLinking(args)        
-    if args.light_pretrained_weights is not None:
+    full_pretrained_weights = getattr(args, "full_pretrained_weights", None)
+    if full_pretrained_weights is not None:
+        assert os.path.exists(full_pretrained_weights), "Full pretrained weights must exist"
+        print("... Loading complete fine-tuned text/linking baseline ...")
+        checkpoint = load_model_weights(full_pretrained_weights)
+        if checkpoint and next(iter(checkpoint)).startswith('module.'):
+            checkpoint = {key[len('module.'):]: value for key, value in checkpoint.items()}
+        msg = model.load_state_dict(checkpoint, strict=False)
+        print(msg)
+    elif args.light_pretrained_weights is not None:
         assert os.path.exists(args.light_pretrained_weights), "LIGHT pretrained weights must exists"
         print("... Loading pretrained weights for LIGHT ...")
         checkpoint = load_model_weights(args.light_pretrained_weights)
@@ -118,12 +152,16 @@ def main():
     print(f"Total parameters: {total_params:,}")
 
     optimizer = build_optimizer(model, args)
+    freeze_base_epochs = getattr(args, "freeze_base_epochs", 0)
+    if freeze_base_epochs > 0:
+        set_pretrained_base_trainable(model, False)
+        print(f"Freezing pretrained baseline for {freeze_base_epochs} epochs")
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, 
         patience=args.scheduler_patience, 
         factor=0.1, 
         threshold=0,
-        min_lr=[0.0000005, 0.000005],
+        min_lr=[0.0000005, 0.0000005, 0.000005],
         verbose=True)
     
     model.to(device)
@@ -133,6 +171,9 @@ def main():
     best_val_loss, epochs_no_improve = np.inf, 0
     
     for epoch in range(args.num_epochs):
+        if epoch == freeze_base_epochs and freeze_base_epochs > 0:
+            set_pretrained_base_trainable(model, True)
+            print(f"Epoch {epoch + 1}: Unfroze pretrained baseline parameters")
         model.train()
         train_dataset.reset()
         

@@ -3,7 +3,7 @@ _BASE_: "./base.yaml"
 # base settings
 output_dir: './_runs/'
 base_model: "light"
-exp_name: 'visual_edge_residual'
+exp_name: 'visual_edge_residual_baseline_init'
 embedding_components: ["token", "poly"]
 aux_losses: ["bidirection", "focal"]
 
@@ -24,8 +24,9 @@ visual_pair_dim: 32
 visual_edge_initial_scale: 0.05
 visual_edge_max_scale: 1.0
 
-# Retain the original relation scoring path while testing richer crop pairs.
-use_pairwise_relations: True
+# The clean text-only checkpoint has no relation MLP. Geometry is already part
+# of the new visual edge scorer, so avoid introducing another random branch.
+use_pairwise_relations: False
 preserve_text_stop_scores: False
 style_contrastive_weight: 0.0
 
@@ -38,6 +39,10 @@ poly_only: False
 text_only: False
 
 light_pretrained_weights: "/workspace/weights/pretrain_light/model_epoch_3500.pth"
+# Initialize the complete text/layout linking model; only the new visual
+# residual parameters should be missing when this checkpoint is loaded.
+full_pretrained_weights: "/workspace/weights/finetune_light/best_model.pth"
+freeze_base_epochs: 3
 # light_pretrained_weights: "_runs/test__v3/models/model_epoch_1.pth"
 
 batch_size: 2
@@ -53,8 +58,10 @@ num_epochs: 100
 lr: 0.00005
 # Lower learning rate for the pretrained LIGHT backbone.
 backbone_lr: 0.000005
+# Existing token/linking/relation heads loaded from the text-only baseline.
+base_task_lr: 0.000005
 weight_decay: 0.0
 scheduler_patience: 5
 patience: 9
 
-version: 6
+version: 7

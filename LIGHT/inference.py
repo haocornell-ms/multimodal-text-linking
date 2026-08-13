@@ -16,6 +16,7 @@ from dataset.dataset import LinkingTestDataset
 from dataset.buildin import DATASET_META
 from models.text_linking import LightTextLinking
 from models.model_utils import get_processors
+from train_candidate_verifier import PairVerifier, candidate_vector
 
 
 def group_successors(elements, successors):
@@ -222,6 +223,74 @@ def print_visual_contribution_summary(records, max_examples):
         )
 
 
+def load_candidate_verifier(path, device):
+    checkpoint = torch.load(path, map_location='cpu')
+    verifier = PairVerifier(checkpoint['input_dim'])
+    verifier.load_state_dict(checkpoint['model_state_dict'])
+    verifier.to(device).eval()
+    return verifier, checkpoint
+
+
+def apply_candidate_verifier(probabilities, bi_probabilities, sample_data,
+                             verifier, checkpoint, device):
+    """Conservatively promote a verified top-3 candidate before decoding."""
+    num_words = probabilities.shape[0]
+    word_ids = sample_data['ori_word_ids']
+    words = [
+        {
+            'source_text': sample_data['ori_words'][int(word_ids[index])],
+            'source_vertices': sample_data['ori_polygons'][int(word_ids[index])],
+        }
+        for index in range(num_words)
+    ]
+    styles = sample_data['word_styles'].cpu().numpy()
+    geometries = sample_data['word_geometries'].cpu().numpy()
+    visual_mask = sample_data['word_visual_mask'].bool().cpu().numpy()
+    word_features = []
+    for index in range(num_words):
+        if index < len(visual_mask) and visual_mask[index]:
+            word_features.append((styles[index], geometries[index]))
+        else:
+            word_features.append((
+                np.zeros(styles.shape[-1], dtype=np.float32),
+                np.zeros(geometries.shape[-1], dtype=np.float32),
+            ))
+
+    mean = checkpoint['feature_mean']
+    std = checkpoint['feature_std']
+    threshold = checkpoint['report']['threshold']
+    margin = checkpoint['report']['margin']
+    interventions = 0
+    for source_index in range(num_words):
+        candidate_indices = np.argsort(probabilities[source_index])[::-1][:3]
+        vectors = []
+        for rank, target_index in enumerate(candidate_indices):
+            target_index = int(target_index)
+            candidate = {
+                'target_text': words[target_index]['source_text'],
+                'target_vertices': words[target_index]['source_vertices'],
+                'probability': float(probabilities[source_index, target_index]),
+                'reverse_probability': float(bi_probabilities[target_index, source_index]),
+                'is_self': target_index == source_index,
+            }
+            vectors.append(candidate_vector(
+                source_index, target_index, candidate, rank, words, word_features
+            ))
+        features = torch.from_numpy((np.asarray(vectors) - mean) / std).to(device)
+        scores = torch.sigmoid(verifier(features)).detach().cpu().numpy()
+        selected = int(scores.argmax())
+        if (selected != 0 and scores[selected] >= threshold
+                and scores[selected] - scores[0] >= margin):
+            original_index = int(candidate_indices[0])
+            selected_index = int(candidate_indices[selected])
+            probabilities[source_index, original_index], probabilities[source_index, selected_index] = (
+                probabilities[source_index, selected_index],
+                probabilities[source_index, original_index],
+            )
+            interventions += 1
+    return interventions
+
+
 def main():
     # python inference.py --test_dataset test --out_file lithium.json --model_dir _runs/best/ --anno_path /home/yaoyi/shared/critical-maas/12month-text-extraction/spot/lithium.json  --img_dir /home/yaoyi/shared/critical-maas/12month-text-extraction/img_crops/lithium
     
@@ -255,6 +324,10 @@ def main():
         '--skip_evaluation', action='store_true',
         help='Write predictions without invoking the external test evaluator.'
     )
+    parser.add_argument(
+        '--candidate_verifier', type=str, default=None,
+        help='Optional trained verifier used for conservative top-3 reranking.'
+    )
     args, remaining_args = parser.parse_known_args()
     
     with open(os.path.join(args.model_dir, 'config.yaml'), 'r') as f:
@@ -285,6 +358,16 @@ def main():
     if model.visual_edge_scale is not None:
         print(f"Learned visual edge residual scale: {model.visual_edge_scale.item():.6f}")
     model.to(device)
+    verifier = verifier_checkpoint = None
+    if args.candidate_verifier:
+        verifier, verifier_checkpoint = load_candidate_verifier(
+            args.candidate_verifier, device
+        )
+        print(
+            "Candidate verifier enabled: "
+            f"threshold={verifier_checkpoint['report']['threshold']}, "
+            f"margin={verifier_checkpoint['report']['margin']}"
+        )
     
     ### Load data ###
     args.test_data_shuffle=False
@@ -296,6 +379,7 @@ def main():
         result_list = []
         probability_result_list = []
         visual_contribution_records = []
+        verifier_interventions = 0
         for i in tqdm(range(len(test_dataset)), total=len(test_dataset)):
             sample_data = test_dataset[i]
             if sample_data is None:
@@ -330,6 +414,12 @@ def main():
             bi_probabilities = torch.softmax(all_logits['bi_logits'][0], dim=-1)
             probabilities = probabilities.detach().cpu().numpy()
             bi_probabilities = bi_probabilities.detach().cpu().numpy()
+
+            if verifier is not None:
+                verifier_interventions += apply_candidate_verifier(
+                    probabilities, bi_probabilities, sample_data,
+                    verifier, verifier_checkpoint, device,
+                )
 
             if args.prob_out_file:
                 probability_result_list.append({
@@ -386,6 +476,8 @@ def main():
                 visual_contribution_records,
                 args.visual_contribution_examples,
             )
+        if verifier is not None:
+            print(f"Candidate verifier interventions: {verifier_interventions}")
 
     if args.skip_evaluation:
         return

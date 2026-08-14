@@ -124,6 +124,34 @@ def summarize_geometry(edges, node_by_id):
     }
 
 
+def geometry_breakdown(values):
+    distance_bins = Counter()
+    angle_bins = Counter()
+    for value in values:
+        distance = value['distance']
+        if distance <= 50:
+            distance_bins['0-50'] += 1
+        elif distance <= 100:
+            distance_bins['50-100'] += 1
+        elif distance <= 200:
+            distance_bins['100-200'] += 1
+        elif distance <= 400:
+            distance_bins['200-400'] += 1
+        else:
+            distance_bins['400+'] += 1
+        angle = value['angle']
+        if angle <= 15:
+            angle_bins['horizontal_0-15'] += 1
+        elif angle >= 75:
+            angle_bins['vertical_75-90'] += 1
+        else:
+            angle_bins['diagonal_15-75'] += 1
+    return {
+        'distance_bins': dict(distance_bins),
+        'angle_bins': dict(angle_bins),
+    }
+
+
 def draw_edge(draw, edge, nodes, color, width):
     first, second = (nodes[node_id] for node_id in edge)
     draw.line((first['center'], second['center']), fill=color, width=width)
@@ -212,6 +240,8 @@ def analyze(annotation, baseline_predictions, visual_predictions, image_dir,
         visual_metrics = edge_metrics(visual_edges, target_edges)
         records.append({
             'image': name,
+            'num_words': len(truth_image['nodes']),
+            'num_true_edges': len(target_edges),
             'baseline': baseline_metrics,
             'visual': visual_metrics,
             'delta_f1': visual_metrics['f1'] - baseline_metrics['f1'],
@@ -232,6 +262,35 @@ def analyze(annotation, baseline_predictions, visual_predictions, image_dir,
             'mean_angle': (
                 sum(value['angle'] for value in values) / len(values)
                 if values else 0.0
+            ),
+            **geometry_breakdown(values),
+        }
+
+    complexity_summary = {}
+    complexity_groups = {
+        '0-25_edges': lambda count: count <= 25,
+        '26-75_edges': lambda count: 25 < count <= 75,
+        '76-150_edges': lambda count: 75 < count <= 150,
+        '151+_edges': lambda count: count > 150,
+    }
+    for label, predicate in complexity_groups.items():
+        subset = [
+            record for record in records
+            if predicate(record['num_true_edges'])
+        ]
+        complexity_summary[label] = {
+            'images': len(subset),
+            'mean_delta_f1': (
+                sum(record['delta_f1'] for record in subset) / len(subset)
+                if subset else 0.0
+            ),
+            'improved_fraction': (
+                sum(record['delta_f1'] > 0 for record in subset) / len(subset)
+                if subset else 0.0
+            ),
+            'mean_net_correct_edges': (
+                sum(record['net_correct_edges'] for record in subset) / len(subset)
+                if subset else 0.0
             ),
         }
 
@@ -263,6 +322,7 @@ def analyze(annotation, baseline_predictions, visual_predictions, image_dir,
         json.dump({
             'totals': dict(totals),
             'geometry': geometry_summary,
+            'complexity': complexity_summary,
             'images': records,
         }, file, indent=2)
     with open(os.path.join(output_dir, 'per_image.csv'), 'w', newline='') as file:
@@ -304,6 +364,7 @@ def analyze(annotation, baseline_predictions, visual_predictions, image_dir,
         'unchanged_images': unchanged_count,
         'totals': dict(totals),
         'geometry': geometry_summary,
+        'complexity': complexity_summary,
         'output_dir': output_dir,
     }, indent=2))
 

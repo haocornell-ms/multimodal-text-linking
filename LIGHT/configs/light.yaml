@@ -24,8 +24,12 @@ use_factorized_linking: False
 use_visual_edge_residual: True
 use_token_style_fusion: False
 visual_pair_dim: 32
-visual_edge_initial_scale: 0.05
-visual_edge_max_scale: 1.0
+visual_edge_initial_scale: 0.025
+visual_edge_max_scale: 0.06
+# Add a per-image soft edge-F1 objective to the stable successor CE losses.
+# Both directions are included; this value weights their summed contribution.
+edge_soft_f1_weight: 0.25
+edge_soft_f1_epsilon: 0.000001
 
 # The clean text-only checkpoint has no relation MLP. Geometry is already part
 # of the new visual edge scorer, so avoid introducing another random branch.
@@ -74,6 +78,9 @@ min_epochs_before_early_stop: 30
 scheduler_patience: 10
 patience: 20
 
-# Keep the completed v7-v9 runs intact; this is visual-only training without
-# the conflicting focal objective.
-version: 10
+# Choose checkpoints using final successor assignments rather than CE alone.
+# The LR scheduler still follows validation loss for stable optimization.
+checkpoint_selection: "decoded_edge_f1"
+
+# Keep the completed v7-v10 runs intact.
+version: 11

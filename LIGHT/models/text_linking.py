@@ -125,6 +125,8 @@ class LightTextLinking(nn.Module):
         self.use_pairwise_relations = getattr(args, "use_pairwise_relations", False)
         self.preserve_text_stop_scores = getattr(args, "preserve_text_stop_scores", False)
         self.style_contrastive_weight = getattr(args, "style_contrastive_weight", 0.1)
+        self.edge_soft_f1_weight = getattr(args, "edge_soft_f1_weight", 0.0)
+        self.edge_soft_f1_epsilon = getattr(args, "edge_soft_f1_epsilon", 1e-6)
         self.style_temperature = getattr(args, "style_temperature", 0.1)
         self.style_dim = getattr(args, "style_embedding_dim", 256)
         self.style_fusion_hidden_dim = getattr(args, "style_fusion_hidden_dim", self.emb_dim)
@@ -549,6 +551,14 @@ class LightTextLinking(nn.Module):
             loss = self.loss_fn(bi_dot_products, targer_prev_indices)
             losses['bidirection'] = loss
 
+        if self.edge_soft_f1_weight > 0:
+            losses['edge_soft_f1_loss'] = self.edge_soft_f1_weight * (
+                self.compute_soft_edge_f1_loss(dot_products, target_matrix_succ)
+                + self.compute_soft_edge_f1_loss(
+                    bi_dot_products, target_matrix_prev
+                )
+            )
+
         if 'focal' in self.aux_losses:
             losses['focal_loss'] = 0
             focal_loss = self.focal_loss_fn(dot_products, target_matrix_succ)
@@ -559,3 +569,23 @@ class LightTextLinking(nn.Module):
                 losses['focal_loss'] += focal_loss.mean() * 100
 
         return losses
+
+    def compute_soft_edge_f1_loss(self, logits, edge_targets):
+        """Differentiable per-image F1 over non-STOP successor edges."""
+        probabilities = torch.softmax(logits, dim=-1)
+        off_diagonal = ~torch.eye(
+            logits.shape[0], dtype=torch.bool, device=logits.device
+        )
+        edge_probabilities = probabilities[off_diagonal]
+        edge_targets = edge_targets[off_diagonal]
+        true_positives = (edge_probabilities * edge_targets).sum()
+        predicted_positives = edge_probabilities.sum()
+        actual_positives = edge_targets.sum()
+        soft_f1 = (
+            2.0 * true_positives + self.edge_soft_f1_epsilon
+        ) / (
+            predicted_positives
+            + actual_positives
+            + self.edge_soft_f1_epsilon
+        )
+        return 1.0 - soft_f1

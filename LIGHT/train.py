@@ -93,15 +93,78 @@ def set_pretrained_base_eval(model):
             module.eval()
 
 
+def decode_successor_edges(probabilities, reverse_probabilities):
+    """Match inference's one-to-one successor assignment and return edges."""
+    probabilities = probabilities.copy()
+    reverse_probabilities = reverse_probabilities.copy()
+    num_words = probabilities.shape[0]
+    word_to_successor = {}
+    successor_to_word = {}
+    while len(word_to_successor) < num_words:
+        for source_index in range(num_words):
+            target_index = int(np.argmax(probabilities[source_index]))
+            if target_index not in successor_to_word:
+                word_to_successor[source_index] = target_index
+                successor_to_word[target_index] = source_index
+                continue
+            old_source = successor_to_word[target_index]
+            if old_source == source_index:
+                continue
+            if old_source == target_index:
+                word_to_successor[source_index] = target_index
+                successor_to_word[target_index] = source_index
+            elif source_index == target_index:
+                word_to_successor[source_index] = target_index
+            elif (reverse_probabilities[target_index, source_index]
+                  > reverse_probabilities[target_index, old_source]):
+                word_to_successor[source_index] = target_index
+                successor_to_word[target_index] = source_index
+                word_to_successor.pop(old_source)
+                probabilities[old_source, target_index] = 0.0
+                reverse_probabilities[target_index, old_source] = 0.0
+            else:
+                probabilities[source_index, target_index] = 0.0
+                reverse_probabilities[target_index, source_index] = 0.0
+    return {
+        (source, target) for source, target in word_to_successor.items()
+        if source != target
+    }
+
+
+def ground_truth_successor_edges(labels):
+    label_to_index = {int(label): index for index, label in enumerate(labels)}
+    edges = set()
+    for source_index, label in enumerate(labels):
+        group_id, sequence_id = str(int(label)).split('000', 1)
+        next_label = int(f"{int(group_id)}000{int(sequence_id) + 1}")
+        if next_label in label_to_index:
+            edges.add((source_index, label_to_index[next_label]))
+    return edges
+
+
 def validate(model, data_loader, device, log_writer, epoch=None):
     model.eval()
     total_losses = defaultdict(int)
+    edge_true_positives = edge_false_positives = edge_false_negatives = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(data_loader):
             input_data = {k: v.to(device) for k, v in batch.items()}
-            _, losses = model(input_data, return_loss=True)
+            outputs, losses = model(input_data, return_loss=True)
             for k, loss in losses.items():
                 total_losses[k] += loss.item() / len(data_loader)
+            for sample_index, (logits, reverse_logits) in enumerate(zip(
+                    outputs['logits'], outputs['bi_logits'])):
+                first_token_indices = input_data['first_token_indices'][sample_index]
+                first_token_indices = first_token_indices[first_token_indices != -999]
+                labels = input_data['labels'][sample_index][first_token_indices]
+                predicted_edges = decode_successor_edges(
+                    torch.softmax(logits, dim=-1).cpu().numpy(),
+                    torch.softmax(reverse_logits, dim=-1).cpu().numpy(),
+                )
+                target_edges = ground_truth_successor_edges(labels.cpu().tolist())
+                edge_true_positives += len(predicted_edges & target_edges)
+                edge_false_positives += len(predicted_edges - target_edges)
+                edge_false_negatives += len(target_edges - predicted_edges)
                 
     if model.use_factorized_linking:
         val_loss = sum(total_losses.values())
@@ -113,7 +176,15 @@ def validate(model, data_loader, device, log_writer, epoch=None):
         print(f"Epoch {epoch + 1}: Validation {k}: {loss}")
         log_writer.add_scalar(f"Loss/Val_{k}", loss, epoch)
     print(f"Epoch {epoch + 1}: Validation selection_loss: {val_loss}")
-    return val_loss
+    denominator = (
+        2 * edge_true_positives + edge_false_positives + edge_false_negatives
+    )
+    decoded_edge_f1 = (
+        2 * edge_true_positives / denominator if denominator else 1.0
+    )
+    print(f"Epoch {epoch + 1}: Validation decoded_edge_f1: {decoded_edge_f1}")
+    log_writer.add_scalar("Metric/Val_decoded_edge_f1", decoded_edge_f1, epoch)
+    return val_loss, decoded_edge_f1
 
 
 def main():
@@ -180,7 +251,9 @@ def main():
 
     ###
     ### training
-    best_val_loss, epochs_no_improve = np.inf, 0
+    best_val_loss, best_decoded_edge_f1, epochs_no_improve = np.inf, -np.inf, 0
+    checkpoint_selection = getattr(args, "checkpoint_selection", "val_loss")
+    print(f"Best-checkpoint selection: {checkpoint_selection}")
     min_epochs_before_early_stop = getattr(args, "min_epochs_before_early_stop", 0)
     if min_epochs_before_early_stop > 0:
         print(
@@ -229,16 +302,31 @@ def main():
 
         ### validate
         if (epoch + 1) % args.eval_every_epoch == 0:
-            val_loss = validate(model, val_dataloader, device, log_writer=log_writer, epoch=epoch)
-            if val_loss < best_val_loss:
-                print(f"Loss decreases: {best_val_loss-val_loss}, Best model saved.")            
+            val_loss, decoded_edge_f1 = validate(
+                model, val_dataloader, device, log_writer=log_writer, epoch=epoch
+            )
+            metric_improved = (
+                decoded_edge_f1 > best_decoded_edge_f1
+                if checkpoint_selection == "decoded_edge_f1"
+                else val_loss < best_val_loss
+            )
+            if metric_improved:
+                print(
+                    f"Selection metric improved; saving best model "
+                    f"(val_loss={val_loss:.6f}, "
+                    f"decoded_edge_f1={decoded_edge_f1:.6f})."
+                )
                 model_save_path = os.path.join(args.output_dir, "best_model.pth")
                 torch.save(model.state_dict(), model_save_path)
                 best_val_loss = val_loss
+                best_decoded_edge_f1 = decoded_edge_f1
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
-                print(f"No improvement in val loss for {epochs_no_improve} epochs.")
+                print(
+                    f"No improvement in {checkpoint_selection} for "
+                    f"{epochs_no_improve} epochs."
+                )
                     
             scheduler.step(val_loss)
 

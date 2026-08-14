@@ -230,6 +230,14 @@ def main():
     total_params = count_parameters(model, trainable_only=False)
     print(f"Total parameters: {total_params:,}")
 
+    if (getattr(args, "freeze_visual_edge_scale", False)
+            and model.visual_edge_scale is not None):
+        model.visual_edge_scale_logit.requires_grad = False
+        print(
+            "Freezing visual edge residual scale at "
+            f"{model.visual_edge_scale.detach().item():.6f}"
+        )
+
     optimizer = build_optimizer(model, args)
     freeze_base_epochs = getattr(args, "freeze_base_epochs", 0)
     freeze_pretrained_base = getattr(args, "freeze_pretrained_base", False)

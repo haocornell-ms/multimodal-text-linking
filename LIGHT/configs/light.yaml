@@ -26,10 +26,18 @@ use_token_style_fusion: False
 visual_pair_dim: 32
 visual_edge_initial_scale: 0.025
 visual_edge_max_scale: 0.06
-# Add a per-image soft edge-F1 objective to the stable successor CE losses.
-# Both directions are included; this value weights their summed contribution.
-edge_soft_f1_weight: 0.25
+# Keep calibration fixed while the visual residual learns decoder-aware scores.
+freeze_visual_edge_scale: True
+# V12 replaces dense soft-F1 with losses matching the discrete decoder's main
+# failure modes: wrong top candidates, successor collisions, and disagreement
+# between the forward and reverse directions.
+edge_soft_f1_weight: 0.0
 edge_soft_f1_epsilon: 0.000001
+edge_ranking_weight: 0.2
+edge_ranking_margin: 0.2
+edge_ranking_top_k: 3
+edge_collision_weight: 0.1
+edge_consistency_weight: 0.05
 
 # The clean text-only checkpoint has no relation MLP. Geometry is already part
 # of the new visual edge scorer, so avoid introducing another random branch.
@@ -82,5 +90,5 @@ patience: 20
 # The LR scheduler still follows validation loss for stable optimization.
 checkpoint_selection: "decoded_edge_f1"
 
-# Keep the completed v7-v10 runs intact.
-version: 11
+# Keep the completed v7-v11 runs intact.
+version: 12

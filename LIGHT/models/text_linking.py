@@ -127,6 +127,11 @@ class LightTextLinking(nn.Module):
         self.style_contrastive_weight = getattr(args, "style_contrastive_weight", 0.1)
         self.edge_soft_f1_weight = getattr(args, "edge_soft_f1_weight", 0.0)
         self.edge_soft_f1_epsilon = getattr(args, "edge_soft_f1_epsilon", 1e-6)
+        self.edge_ranking_weight = getattr(args, "edge_ranking_weight", 0.0)
+        self.edge_ranking_margin = getattr(args, "edge_ranking_margin", 0.2)
+        self.edge_ranking_top_k = getattr(args, "edge_ranking_top_k", 3)
+        self.edge_collision_weight = getattr(args, "edge_collision_weight", 0.0)
+        self.edge_consistency_weight = getattr(args, "edge_consistency_weight", 0.0)
         self.style_temperature = getattr(args, "style_temperature", 0.1)
         self.style_dim = getattr(args, "style_embedding_dim", 256)
         self.style_fusion_hidden_dim = getattr(args, "style_fusion_hidden_dim", self.emb_dim)
@@ -543,11 +548,13 @@ class LightTextLinking(nn.Module):
                 targer_prev_indices.append(label_to_index[label])
             
         target_next_indices = torch.tensor(target_next_indices, dtype=torch.long).to(dot_products.device)
+        targer_prev_indices = torch.tensor(
+            targer_prev_indices, dtype=torch.long, device=dot_products.device
+        )
         loss = self.loss_fn(dot_products, target_next_indices)        
         losses['base_loss'] = loss
 
         if 'bidirection' in self.aux_losses:
-            targer_prev_indices = torch.tensor(targer_prev_indices, dtype=torch.long).to(dot_products.device)
             loss = self.loss_fn(bi_dot_products, targer_prev_indices)
             losses['bidirection'] = loss
 
@@ -556,6 +563,29 @@ class LightTextLinking(nn.Module):
                 self.compute_soft_edge_f1_loss(dot_products, target_matrix_succ)
                 + self.compute_soft_edge_f1_loss(
                     bi_dot_products, target_matrix_prev
+                )
+            )
+
+        if self.edge_ranking_weight > 0:
+            losses['edge_ranking_loss'] = self.edge_ranking_weight * (
+                self.compute_hard_negative_ranking_loss(
+                    dot_products, target_next_indices
+                )
+                + self.compute_hard_negative_ranking_loss(
+                    bi_dot_products, targer_prev_indices
+                )
+            )
+
+        if self.edge_collision_weight > 0:
+            losses['edge_collision_loss'] = self.edge_collision_weight * (
+                self.compute_successor_collision_loss(dot_products)
+                + self.compute_successor_collision_loss(bi_dot_products)
+            )
+
+        if self.edge_consistency_weight > 0:
+            losses['edge_consistency_loss'] = self.edge_consistency_weight * (
+                self.compute_direction_consistency_loss(
+                    dot_products, bi_dot_products
                 )
             )
 
@@ -589,3 +619,42 @@ class LightTextLinking(nn.Module):
             + self.edge_soft_f1_epsilon
         )
         return 1.0 - soft_f1
+
+    def compute_hard_negative_ranking_loss(self, logits, target_indices):
+        """Require the correct successor to outrank the hardest alternatives."""
+        num_candidates = logits.shape[1]
+        if num_candidates <= 1:
+            return logits.new_zeros(())
+        target_scores = logits.gather(1, target_indices[:, None])
+        negative_mask = torch.ones_like(logits, dtype=torch.bool)
+        negative_mask.scatter_(1, target_indices[:, None], False)
+        negative_scores = logits.masked_fill(~negative_mask, float('-inf'))
+        top_k = min(self.edge_ranking_top_k, num_candidates - 1)
+        hard_negatives = negative_scores.topk(top_k, dim=1).values
+        return F.relu(
+            self.edge_ranking_margin + hard_negatives - target_scores
+        ).mean()
+
+    @staticmethod
+    def compute_successor_collision_loss(logits):
+        """Penalize more than one source assigning mass to the same successor."""
+        probabilities = torch.softmax(logits, dim=-1)
+        off_diagonal = ~torch.eye(
+            logits.shape[0], dtype=torch.bool, device=logits.device
+        )
+        incoming_edge_mass = (
+            probabilities * off_diagonal.to(probabilities.dtype)
+        ).sum(dim=0)
+        return F.relu(incoming_edge_mass - 1.0).square().mean()
+
+    @staticmethod
+    def compute_direction_consistency_loss(logits, reverse_logits):
+        """Make forward successor and reverse predecessor probabilities agree."""
+        probabilities = torch.softmax(logits, dim=-1)
+        reverse_probabilities = torch.softmax(reverse_logits, dim=-1).T
+        off_diagonal = ~torch.eye(
+            logits.shape[0], dtype=torch.bool, device=logits.device
+        )
+        return F.smooth_l1_loss(
+            probabilities[off_diagonal], reverse_probabilities[off_diagonal]
+        )

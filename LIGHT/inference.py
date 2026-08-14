@@ -11,6 +11,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from PIL import Image
 
 from dataset.dataset import LinkingTestDataset
 from dataset.buildin import DATASET_META

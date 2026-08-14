@@ -17,6 +17,9 @@ from dataset.buildin import DATASET_META
 from models.text_linking import LightTextLinking
 from models.model_utils import get_processors
 from train_candidate_verifier import PairVerifier, candidate_vector
+from train_contextual_pair_reranker import (
+    ContextPairReranker, context_numeric_features, extract_context_pair_crop,
+)
 
 
 def group_successors(elements, successors):
@@ -291,6 +294,80 @@ def apply_candidate_verifier(probabilities, bi_probabilities, sample_data,
     return interventions
 
 
+def load_context_reranker(path, device):
+    checkpoint = torch.load(path, map_location='cpu')
+    model = ContextPairReranker(checkpoint['numeric_dim'])
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(device).eval()
+    return model, checkpoint
+
+
+def apply_context_reranker(probabilities, bi_probabilities, sample_data,
+                           image, model, checkpoint, device):
+    num_words = probabilities.shape[0]
+    word_ids = sample_data['ori_word_ids']
+    words = [
+        {
+            'source_text': sample_data['ori_words'][int(word_ids[index])],
+            'source_vertices': sample_data['ori_polygons'][int(word_ids[index])],
+        }
+        for index in range(num_words)
+    ]
+    group_records, all_crops, all_numeric = [], [], []
+    for source_index in range(num_words):
+        candidate_indices = np.argsort(probabilities[source_index])[::-1][:3]
+        start = len(all_crops)
+        for rank, target_index in enumerate(candidate_indices):
+            target_index = int(target_index)
+            candidate = {
+                'probability': float(probabilities[source_index, target_index]),
+                'reverse_probability': float(
+                    bi_probabilities[target_index, source_index]
+                ),
+                'is_self': target_index == source_index,
+            }
+            all_crops.append(extract_context_pair_crop(
+                image,
+                words[source_index]['source_vertices'],
+                words[target_index]['source_vertices'],
+                checkpoint['crop_height'], checkpoint['crop_width'],
+                checkpoint['context_scale'],
+            ))
+            all_numeric.append(context_numeric_features(
+                words[source_index], words[target_index], candidate, rank
+            ))
+        group_records.append((candidate_indices, start))
+    numeric = (
+        np.asarray(all_numeric, dtype=np.float32) - checkpoint['numeric_mean']
+    ) / checkpoint['numeric_std']
+    scores = []
+    batch_size = 256
+    with torch.no_grad():
+        for start in range(0, len(all_crops), batch_size):
+            crops = torch.stack(all_crops[start:start + batch_size]).to(device)
+            features = torch.from_numpy(
+                numeric[start:start + batch_size]
+            ).to(device)
+            scores.append(model(crops, features).cpu())
+    scores = torch.cat(scores).view(num_words, 3)
+    scores = torch.softmax(scores, dim=1).numpy()
+    threshold = checkpoint['report']['threshold']
+    margin = checkpoint['report']['margin']
+    interventions = 0
+    for source_index, (candidate_indices, _) in enumerate(group_records):
+        selected = int(scores[source_index].argmax())
+        if (selected != 0 and scores[source_index, selected] >= threshold
+                and scores[source_index, selected] - scores[source_index, 0] >= margin):
+            original_index = int(candidate_indices[0])
+            selected_index = int(candidate_indices[selected])
+            probabilities[source_index, original_index], probabilities[source_index, selected_index] = (
+                probabilities[source_index, selected_index],
+                probabilities[source_index, original_index],
+            )
+            interventions += 1
+    return interventions
+
+
 def main():
     # python inference.py --test_dataset test --out_file lithium.json --model_dir _runs/best/ --anno_path /home/yaoyi/shared/critical-maas/12month-text-extraction/spot/lithium.json  --img_dir /home/yaoyi/shared/critical-maas/12month-text-extraction/img_crops/lithium
     
@@ -327,6 +404,10 @@ def main():
     parser.add_argument(
         '--candidate_verifier', type=str, default=None,
         help='Optional trained verifier used for conservative top-3 reranking.'
+    )
+    parser.add_argument(
+        '--context_reranker', type=str, default=None,
+        help='Optional contextual pair-crop top-3 reranker checkpoint.'
     )
     args, remaining_args = parser.parse_known_args()
     
@@ -367,6 +448,16 @@ def main():
             "Candidate verifier enabled: "
             f"threshold={verifier_checkpoint['report']['threshold']}, "
             f"margin={verifier_checkpoint['report']['margin']}"
+        )
+    context_reranker = context_checkpoint = None
+    if args.context_reranker:
+        context_reranker, context_checkpoint = load_context_reranker(
+            args.context_reranker, device
+        )
+        print(
+            "Contextual pair reranker enabled: "
+            f"threshold={context_checkpoint['report']['threshold']}, "
+            f"margin={context_checkpoint['report']['margin']}"
         )
     
     ### Load data ###
@@ -419,6 +510,14 @@ def main():
                 verifier_interventions += apply_candidate_verifier(
                     probabilities, bi_probabilities, sample_data,
                     verifier, verifier_checkpoint, device,
+                )
+            if context_reranker is not None:
+                source_image = Image.open(
+                    os.path.join(args.img_dir, sample_data['image_name'])
+                ).convert('RGB')
+                verifier_interventions += apply_context_reranker(
+                    probabilities, bi_probabilities, sample_data, source_image,
+                    context_reranker, context_checkpoint, device,
                 )
 
             if args.prob_out_file:

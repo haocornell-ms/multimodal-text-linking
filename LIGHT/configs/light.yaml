@@ -62,10 +62,10 @@ light_pretrained_weights: "/workspace/weights/pretrain_light/model_epoch_3500.pt
 # Initialize the complete text/layout linking model; only the new visual
 # residual parameters should be missing when this checkpoint is loaded.
 full_pretrained_weights: "/workspace/weights/finetune_light/best_model.pth"
-# Keep the original LIGHT backbone and linking heads fixed. Only the word-style
-# encoder, visual edge scorer, and learned residual scale are trained.
-freeze_pretrained_base: True
-freeze_base_epochs: 0
+# Let the new affinity branch establish a useful signal before allowing the
+# pretrained text/layout model to adapt at its 10x lower learning rate.
+freeze_pretrained_base: False
+freeze_base_epochs: 10
 # light_pretrained_weights: "_runs/test__v3/models/model_epoch_1.pth"
 
 batch_size: 2

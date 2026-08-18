@@ -3,7 +3,7 @@ _BASE_: "./base.yaml"
 # base settings
 output_dir: './_runs/'
 base_model: "light"
-exp_name: 'visual_edge_residual_baseline_init'
+exp_name: 'visual_entity_affinity'
 embedding_components: ["token", "poly"]
 # With the pretrained baseline frozen, optimize the visual residual against the
 # same forward/reverse successor cross-entropy used for checkpoint selection.
@@ -21,23 +21,28 @@ style_embedding_dim: 256
 # Preserve the original joint successor model and add a conservative learned
 # visual/geometry residual directly to candidate-edge scores.
 use_factorized_linking: False
-use_visual_edge_residual: True
+use_visual_edge_residual: False
+use_visual_entity_affinity: True
 use_token_style_fusion: False
 visual_pair_dim: 32
 visual_edge_initial_scale: 0.025
 visual_edge_max_scale: 0.06
 # Keep calibration fixed while the visual residual learns decoder-aware scores.
 freeze_visual_edge_scale: True
+# Same-group probability branch and its learned contribution to link logits.
+entity_affinity_loss_weight: 0.5
+entity_affinity_initial_scale: 0.025
+entity_affinity_max_scale: 0.1
 # V12 replaces dense soft-F1 with losses matching the discrete decoder's main
 # failure modes: wrong top candidates, successor collisions, and disagreement
 # between the forward and reverse directions.
 edge_soft_f1_weight: 0.0
 edge_soft_f1_epsilon: 0.000001
-edge_ranking_weight: 0.2
+edge_ranking_weight: 0.0
 edge_ranking_margin: 0.2
 edge_ranking_top_k: 3
-edge_collision_weight: 0.1
-edge_consistency_weight: 0.05
+edge_collision_weight: 0.0
+edge_consistency_weight: 0.0
 
 # The clean text-only checkpoint has no relation MLP. Geometry is already part
 # of the new visual edge scorer, so avoid introducing another random branch.
@@ -90,5 +95,5 @@ patience: 20
 # The LR scheduler still follows validation loss for stable optimization.
 checkpoint_selection: "decoded_edge_f1"
 
-# Keep the completed v7-v11 runs intact.
-version: 12
+# Keep prior residual and contextual experiments intact.
+version: 14

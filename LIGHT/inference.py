@@ -425,6 +425,7 @@ def main():
         f"preserve_text_stop_scores={getattr(args, 'preserve_text_stop_scores', False)}, "
         f"use_factorized_linking={getattr(args, 'use_factorized_linking', False)}, "
         f"use_visual_edge_residual={getattr(args, 'use_visual_edge_residual', False)}, "
+        f"use_visual_entity_affinity={getattr(args, 'use_visual_entity_affinity', False)}, "
         f"use_token_style_fusion={getattr(args, 'use_token_style_fusion', True)}, "
         f"disable_word_visuals={args.disable_word_visuals}"
     )
@@ -439,6 +440,11 @@ def main():
     print(msg)
     if model.visual_edge_scale is not None:
         print(f"Learned visual edge residual scale: {model.visual_edge_scale.item():.6f}")
+    if model.entity_affinity_scale is not None:
+        print(
+            "Learned entity affinity residual scale: "
+            f"{model.entity_affinity_scale.item():.6f}"
+        )
     model.to(device)
     verifier = verifier_checkpoint = None
     if args.candidate_verifier:

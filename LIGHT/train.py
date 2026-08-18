@@ -35,6 +35,8 @@ def build_optimizer(model, args):
         "word_style_encoder.",
         "visual_edge_scorer.",
         "visual_edge_scale_logit",
+        "visual_entity_affinity_scorer.",
+        "entity_affinity_scale_logit",
     )
     backbone_parameters = [
         parameter for parameter in model.light.parameters() if parameter.requires_grad
@@ -79,6 +81,8 @@ def set_pretrained_base_trainable(model, trainable):
         "word_style_encoder.",
         "visual_edge_scorer.",
         "visual_edge_scale_logit",
+        "visual_entity_affinity_scorer.",
+        "entity_affinity_scale_logit",
     )
     for name, parameter in model.named_parameters():
         if not name.startswith(visual_prefixes):
@@ -87,7 +91,10 @@ def set_pretrained_base_trainable(model, trainable):
 
 def set_pretrained_base_eval(model):
     """Keep dropout and other training-time behavior off in the frozen base."""
-    visual_modules = {"word_style_encoder", "visual_edge_scorer"}
+    visual_modules = {
+        "word_style_encoder", "visual_edge_scorer",
+        "visual_entity_affinity_scorer",
+    }
     for name, module in model.named_children():
         if name not in visual_modules:
             module.eval()
@@ -301,6 +308,15 @@ def main():
             visual_edge_scale = model.visual_edge_scale.detach().item()
             print(f"Epoch {epoch + 1}: Visual edge residual scale: {visual_edge_scale:.6f}")
             log_writer.add_scalar("Model/Visual_edge_scale", visual_edge_scale, epoch)
+        if model.entity_affinity_scale is not None:
+            entity_affinity_scale = model.entity_affinity_scale.detach().item()
+            print(
+                f"Epoch {epoch + 1}: Entity affinity residual scale: "
+                f"{entity_affinity_scale:.6f}"
+            )
+            log_writer.add_scalar(
+                "Model/Entity_affinity_scale", entity_affinity_scale, epoch
+            )
 
         ### save model
         if args.save_every_epoch > 0 and (epoch + 1) % args.save_every_epoch == 0:

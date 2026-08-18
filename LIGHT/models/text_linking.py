@@ -113,6 +113,121 @@ class LateVisualEdgeScorer(nn.Module):
         return scores
 
 
+class VisualEntityAffinityScorer(nn.Module):
+    """Predict same-entity probability and an affinity-aware link residual."""
+    def __init__(self, style_dim=256, pair_dim=32, hidden_dim=128):
+        super().__init__()
+        self.style_projection = nn.Sequential(
+            nn.LayerNorm(style_dim), nn.Linear(style_dim, pair_dim), nn.GELU()
+        )
+        # Symmetric inputs make P(i,j) == P(j,i), as required for entity identity.
+        affinity_dim = pair_dim * 3 + 9
+        self.affinity_mlp = nn.Sequential(
+            nn.LayerNorm(affinity_dim),
+            nn.Linear(affinity_dim, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        # Linking remains directional and can combine affinity with map geometry.
+        link_dim = pair_dim * 4 + 11 + 1
+        self.link_mlp = nn.Sequential(
+            nn.LayerNorm(link_dim),
+            nn.Linear(link_dim, hidden_dim), nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        nn.init.normal_(self.affinity_mlp[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.affinity_mlp[-1].bias)
+        nn.init.normal_(self.link_mlp[-1].weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.link_mlp[-1].bias)
+
+    @staticmethod
+    def symmetric_geometry_features(geometry):
+        eps = 1e-6
+        source, target = geometry[:, None, :], geometry[None, :, :]
+        mean_height = 0.5 * (source[..., 3] + target[..., 3]).clamp_min(eps)
+        ndx = (target[..., 0] - source[..., 0]) / mean_height
+        ndy = (target[..., 1] - source[..., 1]) / mean_height
+        distance = torch.sqrt(ndx.square() + ndy.square() + eps)
+        direction_x, direction_y = ndx / distance, ndy / distance
+        width_ratio = torch.log(
+            (target[..., 2] + eps) / (source[..., 2] + eps)
+        ).abs()
+        height_ratio = torch.log(
+            (target[..., 3] + eps) / (source[..., 3] + eps)
+        ).abs()
+        area_ratio = torch.log(
+            (target[..., 4] + eps) / (source[..., 4] + eps)
+        ).abs()
+        orientation_similarity = (
+            source[..., 5] * target[..., 5]
+            + source[..., 6] * target[..., 6]
+        ).abs()
+        return torch.stack((
+            ndx.abs(), ndy.abs(), distance,
+            direction_x.abs(), direction_y.abs(),
+            width_ratio, height_ratio, area_ratio, orientation_similarity,
+        ), dim=-1)
+
+    def forward(self, styles, geometry, visual_mask):
+        num_words = len(styles)
+        affinity_logits = styles.new_zeros((num_words, num_words))
+        link_scores = styles.new_zeros((num_words, num_words))
+        valid_pair_mask = torch.zeros(
+            (num_words, num_words), dtype=torch.bool, device=styles.device
+        )
+        valid_indices = visual_mask.nonzero(as_tuple=False).flatten()
+        if len(valid_indices) < 2:
+            return affinity_logits, link_scores, valid_pair_mask
+
+        style = self.style_projection(styles[valid_indices])
+        valid_geometry = geometry[valid_indices]
+        num_visual_words = len(style)
+        source_style = style[:, None, :].expand(-1, num_visual_words, -1)
+        target_style = style[None, :, :].expand(num_visual_words, -1, -1)
+        symmetric_features = torch.cat((
+            source_style + target_style,
+            (source_style - target_style).abs(),
+            source_style * target_style,
+            self.symmetric_geometry_features(valid_geometry),
+        ), dim=-1)
+        valid_affinity_logits = self.affinity_mlp(
+            symmetric_features
+        ).squeeze(-1)
+        # Numerical averaging guarantees exact symmetry despite finite precision.
+        valid_affinity_logits = 0.5 * (
+            valid_affinity_logits + valid_affinity_logits.T
+        )
+        affinity_probability = torch.sigmoid(valid_affinity_logits)
+
+        directional_geometry = LightTextLinking.geometry_pair_features(
+            valid_geometry
+        )
+        directional_features = torch.cat((
+            source_style,
+            target_style,
+            (source_style - target_style).abs(),
+            source_style * target_style,
+            directional_geometry,
+            affinity_probability.unsqueeze(-1),
+        ), dim=-1)
+        valid_link_scores = self.link_mlp(directional_features).squeeze(-1)
+        off_diagonal = ~torch.eye(
+            num_visual_words, dtype=torch.bool, device=styles.device
+        )
+        valid_link_scores = valid_link_scores * off_diagonal.to(
+            valid_link_scores.dtype
+        )
+        affinity_logits[valid_indices[:, None], valid_indices[None, :]] = (
+            valid_affinity_logits
+        )
+        link_scores[valid_indices[:, None], valid_indices[None, :]] = (
+            valid_link_scores
+        )
+        valid_pair_mask[valid_indices[:, None], valid_indices[None, :]] = (
+            off_diagonal
+        )
+        return affinity_logits, link_scores, valid_pair_mask
+
+
 class LightTextLinking(nn.Module):
     def __init__(self, args):
         super(LightTextLinking, self).__init__()
@@ -137,16 +252,33 @@ class LightTextLinking(nn.Module):
         self.style_fusion_hidden_dim = getattr(args, "style_fusion_hidden_dim", self.emb_dim)
         self.use_factorized_linking = getattr(args, "use_factorized_linking", False)
         self.use_visual_edge_residual = getattr(args, "use_visual_edge_residual", False)
+        self.use_visual_entity_affinity = getattr(
+            args, "use_visual_entity_affinity", False
+        )
         self.use_token_style_fusion = getattr(args, "use_token_style_fusion", True)
         self.stop_loss_weight = getattr(args, "stop_loss_weight", 1.0)
         self.visual_pair_dim = getattr(args, "visual_pair_dim", 32)
         self.visual_edge_max_scale = getattr(args, "visual_edge_max_scale", 1.0)
         self.visual_edge_initial_scale = getattr(args, "visual_edge_initial_scale", 0.05)
-        if (self.use_factorized_linking or self.use_visual_edge_residual) and not self.use_word_style:
+        self.entity_affinity_loss_weight = getattr(
+            args, "entity_affinity_loss_weight", 0.5
+        )
+        self.entity_affinity_max_scale = getattr(
+            args, "entity_affinity_max_scale", 0.1
+        )
+        self.entity_affinity_initial_scale = getattr(
+            args, "entity_affinity_initial_scale", 0.025
+        )
+        if (self.use_factorized_linking or self.use_visual_edge_residual
+                or self.use_visual_entity_affinity) and not self.use_word_style:
             raise ValueError("Visual edge scoring requires use_word_style=True")
-        if self.use_factorized_linking and self.use_visual_edge_residual:
+        if sum((
+                self.use_factorized_linking,
+                self.use_visual_edge_residual,
+                self.use_visual_entity_affinity,
+        )) > 1:
             raise ValueError(
-                "use_factorized_linking and use_visual_edge_residual are mutually exclusive"
+                "factorized, residual, and entity-affinity linking are mutually exclusive"
             )
 
         self.config = LayoutLMv3Config(max_position_embeddings=self.max_position_embeddings)
@@ -159,6 +291,18 @@ class LightTextLinking(nn.Module):
                 self.visual_edge_scorer = LateVisualEdgeScorer(
                     style_dim=self.style_dim, pair_dim=self.visual_pair_dim
                 )
+            if self.use_visual_entity_affinity:
+                self.visual_entity_affinity_scorer = VisualEntityAffinityScorer(
+                    style_dim=self.style_dim, pair_dim=self.visual_pair_dim
+                )
+                initial_fraction = min(max(
+                    self.entity_affinity_initial_scale
+                    / self.entity_affinity_max_scale,
+                    1e-4,
+                ), 1.0 - 1e-4)
+                self.entity_affinity_scale_logit = nn.Parameter(torch.tensor(
+                    torch.logit(torch.tensor(initial_fraction)).item()
+                ))
             if self.use_visual_edge_residual:
                 initial_fraction = min(max(
                     self.visual_edge_initial_scale / self.visual_edge_max_scale,
@@ -210,6 +354,14 @@ class LightTextLinking(nn.Module):
             self.visual_edge_scale_logit
         )
 
+    @property
+    def entity_affinity_scale(self):
+        if not self.use_visual_entity_affinity:
+            return None
+        return self.entity_affinity_max_scale * torch.sigmoid(
+            self.entity_affinity_scale_logit
+        )
+
     def forward(self, input_data, return_loss=True):
         B = input_data['labels'].shape[0]
         attn_mask = input_data['attention_mask']
@@ -226,7 +378,7 @@ class LightTextLinking(nn.Module):
             
         style_embeddings = self.encode_styles(input_data) if self.use_word_style else None
         all_losses = defaultdict(int)
-        all_logits = {'logits': [], 'bi_logits': []}
+        all_logits = {'logits': [], 'bi_logits': [], 'entity_affinity': []}
         for batch_idx in range(B):
             first_token_indices = input_data['first_token_indices'][batch_idx]
             first_token_indices = first_token_indices[first_token_indices != -999]
@@ -263,7 +415,9 @@ class LightTextLinking(nn.Module):
             dot_products = torch.matmul(pred_embeddings, succ_embeddings.T)
             bi_dot_products = torch.matmul(succ_embeddings, pred_embeddings.T)
             geometry = None
-            if self.use_factorized_linking or self.use_visual_edge_residual or self.use_pairwise_relations:
+            if (self.use_factorized_linking or self.use_visual_edge_residual
+                    or self.use_visual_entity_affinity
+                    or self.use_pairwise_relations):
                 available_words = min(num_words, input_data['word_geometries'].shape[1])
                 geometry = embeddings.new_zeros((num_words, 7))
                 geometry[:available_words] = input_data['word_geometries'][batch_idx, :available_words]
@@ -272,6 +426,21 @@ class LightTextLinking(nn.Module):
                 edge_scale = self.visual_edge_scale
                 dot_products = dot_products + edge_scale * edge_delta
                 bi_dot_products = bi_dot_products + edge_scale * edge_delta.T
+            entity_affinity_logits = entity_affinity_pair_mask = None
+            if self.use_visual_entity_affinity:
+                (entity_affinity_logits, entity_link_scores,
+                 entity_affinity_pair_mask) = self.visual_entity_affinity_scorer(
+                    sample_styles, geometry, visual_mask
+                )
+                entity_scale = self.entity_affinity_scale
+                dot_products = dot_products + entity_scale * entity_link_scores
+                bi_dot_products = (
+                    bi_dot_products + entity_scale * entity_link_scores.T
+                )
+                all_logits['entity_affinity'].append(
+                    torch.sigmoid(entity_affinity_logits)
+                    * entity_affinity_pair_mask.to(entity_affinity_logits.dtype)
+                )
             if self.use_factorized_linking:
                 edge_delta = self.visual_edge_scorer(sample_styles, geometry, visual_mask)
                 dot_products = dot_products + edge_delta
@@ -319,7 +488,10 @@ class LightTextLinking(nn.Module):
                         successor_stop_logits, predecessor_stop_logits,
                     )
                 else:
-                    losses = self.compute_sample_losses(lables_B, dot_products, bi_dot_products)
+                    losses = self.compute_sample_losses(
+                        lables_B, dot_products, bi_dot_products,
+                        entity_affinity_logits, entity_affinity_pair_mask,
+                    )
                 for loss_name, loss_value in losses.items():
                     all_losses[loss_name] += loss_value
                 if (self.use_word_style and self.style_contrastive_weight > 0
@@ -520,7 +692,9 @@ class LightTextLinking(nn.Module):
         return losses
 
 
-    def compute_sample_losses(self, labels, dot_products, bi_dot_products):
+    def compute_sample_losses(self, labels, dot_products, bi_dot_products,
+                              entity_affinity_logits=None,
+                              entity_affinity_pair_mask=None):
         losses = {}
         label_to_index = {label.item(): idx for idx, label in enumerate(labels)}
         target_next_indices, targer_prev_indices = [], []
@@ -587,6 +761,31 @@ class LightTextLinking(nn.Module):
                 self.compute_direction_consistency_loss(
                     dot_products, bi_dot_products
                 )
+            )
+
+        if (entity_affinity_logits is not None
+                and entity_affinity_pair_mask is not None
+                and entity_affinity_pair_mask.any()):
+            label_tensor = torch.stack(labels).to(dot_products.device)
+            group_ids = torch.div(label_tensor, 1000, rounding_mode='floor')
+            same_entity_targets = group_ids[:, None].eq(group_ids[None, :])
+            valid_logits = entity_affinity_logits[entity_affinity_pair_mask]
+            valid_targets = same_entity_targets[entity_affinity_pair_mask]
+            positive_logits = valid_logits[valid_targets]
+            negative_logits = valid_logits[~valid_targets]
+            positive_loss = (
+                F.binary_cross_entropy_with_logits(
+                    positive_logits, torch.ones_like(positive_logits)
+                ) if positive_logits.numel() else valid_logits.new_zeros(())
+            )
+            negative_loss = (
+                F.binary_cross_entropy_with_logits(
+                    negative_logits, torch.zeros_like(negative_logits)
+                ) if negative_logits.numel() else valid_logits.new_zeros(())
+            )
+            losses['entity_affinity_loss'] = (
+                self.entity_affinity_loss_weight
+                * 0.5 * (positive_loss + negative_loss)
             )
 
         if 'focal' in self.aux_losses:
